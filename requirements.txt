@@ -1,0 +1,18 @@
+# latex-omml skill 依赖（Python >= 3.9）
+#
+# 开发/验证环境实测版本：
+#   lxml==5.4.0  latex2mathml==3.81.0  python-docx==1.2.0  olefile==0.47
+#   pdfplumber==0.11.9（仅 pdf2docx_math.py 需要）
+#
+# MML2OMML.XSL 已内置在 scripts/ 下，**不需要装 Office**。
+#
+# olefile 是**可选**的：mtef.py 解 MathType OLE 包时优先用它，
+# 没装则自动回退到内置的 CFBF 解析器（scripts/mtef.py 里的 _CFBF 类）。
+# 两条路径已在同一份文档的 59 个公式上验证过，结果逐字节一致。
+# 装上更稳（olefile 覆盖的边界情况更多），不装也能跑。
+
+lxml>=5.0
+latex2mathml>=3.80
+python-docx>=1.1
+olefile>=0.46
+pdfplumber>=0.11

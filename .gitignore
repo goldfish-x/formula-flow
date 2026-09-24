@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 测试产物
+*.docx.tmp
+~$*
+out_*.docx
+*_out.docx
+test_*.docx
+
+# 系统文件
+Thumbs.db
+.DS_Store
