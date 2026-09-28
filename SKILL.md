@@ -1,6 +1,9 @@
 ---
 name: latex-omml
-version: 1.1.1
+version: 1.1.2
+slug: latex-omml
+displayName: 公式美化大师
+summary: 把数学公式变成 Word 里真正可编辑的对象——LaTeX 直接生成、MathType/PDF 无损还原、伪公式批量升级，数字与括号正体、字母斜体，符合试卷排版观感。
 description: 数学公式与 Word 文档的双向解决方案。当需要在 Word/docx 中生成可编辑的数学公式（分数、根号、上下标、希腊字母、集合符号、矩阵、积分求和），从 PPT/PDF/图片中提取数学符号并还原为 LaTeX，解析 MathType OLE 对象里的 MTEF 二进制还原完整公式结构，或把已有 docx 里 Unicode 硬拼的伪公式（a²+b²≥2ab、A⊆B、√(ab)）批量升级为真正的可编辑公式时使用。触发词：数学公式、LaTeX、OMML、公式转Word、可编辑公式、集合符号、⊆ ∅ ∈、生成讲义、试题排版、公式识别、MathType 替代、讲义公式升级、伪公式、MTEF、Equation Native、MathType 转 LaTeX、OLE 公式提取。
 category: 内容创作
 platforms: [windows, macos, linux]
@@ -31,6 +34,11 @@ LaTeX ──latex2mathml──▶ MathML ──MML2OMML.XSL──▶ OMML ──
 
 `MML2OMML.XSL` 是微软 Office 自带的官方转换表，已内置在 `scripts/` 下，
 skill 自包含、可移植到没装 Office 的机器。
+
+**排版规范（v1.1.2 起）**：数字、括号、运算符、标点输出为**正体**（`m:sty="p"`），
+字母（变量）保持默认斜体，符合 GB 3102/ISO 80000 惯例和试卷观感。
+Word 对裸 run 会自动按字符类别排版，但 **WPS 不做自动判定**，裸 run 一律斜体——
+所以这一步必须显式写，两种软件渲染才一致。
 
 ---
 
@@ -450,6 +458,20 @@ python scripts/verify_docx.py output.docx     # 校验：公式数/残留/zip �
 - 保存目标若在 Word 中打开会 PermissionError，脚本自动另存为 `*_new.docx`
 - 跨页表格、旋转文本、真正的扫描件不在覆盖范围内
 
+## 纯扫描件 PDF → 可编辑 Word（多模态路线）
+
+上面两节针对矢量 PDF；**纯扫描件（整页是图）没有文本层**，走这条完整路线。
+7 页扫描试卷实测：原生公式 129 行内 + 11 独立、0 空公式、0 降级残留。
+
+1. **渲染**：`pymupdf` 按 **200dpi** 整页转 PNG（太低识别不准，太高文件巨大）
+2. **逐页识别**：多模态逐页转写为 Markdown（`$...$`/`$$...$$` 公式 + 题号结构）
+3. **关键区域放大核对**：年份、上下标、指数、小数点这类易错处，把局部裁出来放大再看一遍
+4. **裁插图**：题图单独裁出；**每幅必须 Read 回看**，确认四边无相邻文字/题号/选项残留
+   （裁太宽带入题干残句是高频事故；边缘按「图形最外层标注」收口，别把轴标签裁掉）
+5. **组装**：Markdown + 插图 → `md2docx.py` 生成 docx
+6. **校验**：`verify_docx.py`（公式数、降级残留、LaTeX 残留、插图清单对账）
+7. **渲染回看**：按下面「渲染级视觉验证」一节转 PDF → PNG，逐页肉眼核对后才算收尾
+
 ## MathType 文档抢救（MTEF 解析）
 
 老讲义里的公式常常是 **MathType OLE 对象** —— 双击能编辑，但批量处理时
@@ -735,6 +757,42 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
    构建脚本要带兜底：写 `.new` → `os.replace` → 再把旧文件改名成 `.old` 顶上；
    全都失败就保留 `.new` 并明确告知用户「合上 Word 后改名回去」。
    **别默默失败**（那样用户看到的还是旧文件，会以为修复没生效）。
+
+10. **bash heredoc 里写 LaTeX 会被 shell 吃掉反斜杠（2026-09-28 实测）**
+    `python - <<'EOF' ... EOF` 里批量测公式，`\frac` `\leq` 等命令的反斜杠被处理后
+    喂进转换器，测试"全过"是假象。批量公式测试/构建脚本**一律写成 .py 文件再执行**，
+    不要用 heredoc 内联（SKILL 里 `r'\u2640'` 那条坑只覆盖了 .py 文件内的情况）。
+
+11. **扫描页裁插图后必须逐幅回看（2026-09-28 实测）**
+    从扫描页裁插图，裁框太宽会把**相邻的文字残句**一起带进成品：
+    实测磁场图顶部带入题干两行、PV 图底部带入选项"30%/C.18.33%"，
+    XML 级校验（verify_docx）完全不查图片内容，全过——直到渲染成图才肉眼发现。
+    规矩：**每裁一幅就 Read 回看**，确认四边无相邻文字/题号/选项残留；
+    下边界按"图形最外层标注"收口（V 轴标签一度被裁掉，回看才纠正）。
+
+---
+
+## 渲染级视觉验证（docx → PDF → 图，2026-09-28 实测打通）
+
+`verify_docx.py` / `check_omml_delims.py` 都是 **XML 级**校验，只能证明公式对象结构正确，
+证明不了"人打开看到的排版对不对"（插图残文、字体缺失、分页尴尬都查不出）。
+交付前必须走一遍渲染验证：
+
+```
+docx ──COM──▶ PDF ──pymupdf(dpi≈110)──▶ PNG ──Read──▶ 肉眼核对
+```
+
+COM 转换按顺序试：`Word.Application` → `KWPS.Application`（WPS）→ `WPS.Application`。
+
+- **Word COM 在沙箱/受限环境常启动失败**：`80080005 CO_E_SERVER_EXEC_FAILURE`，
+  不是文档问题，别在它身上耗时间，直接落到 WPS。
+- **WPS 实测可用**（12.1.0.28505）：ProgID `KWPS.Application`，`SaveAs2($pdf, 17)` 同 Word。
+  安装路径注册表反查：Uninstall 项 `WPS Office` 的 `UninstallString`（如 `D:\WPS Office\...`）。
+- **COM 脚本的日志写文件**（`Out-File`），不要依赖 stdout —— PowerShell 工具会吞输出。
+- **PowerShell 陷阱**：函数内 `Write-Output` 会混进返回值，`$ok = ConvertWith ...`
+  会把日志字符串也收进 `$ok`，后续 `if (-not $ok)` 判断全部失效。函数用 `return $bool` 纯值，
+  日志走 `Out-File -Append`。
+- 转换前后 `Stop-Process WINWORD,wps` 清残留实例，防止上次卡死的进程占着文件。
 
 ---
 

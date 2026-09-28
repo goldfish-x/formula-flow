@@ -208,6 +208,99 @@ def postprocess_omml_root(root):
     return root
 
 
+# ---------------------------------------------------------------- 正体化（数字/括号不斜体）
+# GB 3102 / ISO 80000 排版惯例：数字、括号、运算符、标点用正体，变量字母用斜体。
+# 背景：Word 对「无 m:sty 的裸 run」按字符类别自动排版（数字/括号自动正体），
+# 但 WPS 的排版引擎不做自动判定，裸 run 一律按斜体渲染，数字和括号看着就是斜的。
+# 因此：不含字母的文本段显式写 m:sty="p"；含字母的段保持默认（Word/WPS 都排斜体）。
+
+_XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space'
+
+
+def _char_is_letter(ch):
+    """字母（拉丁/希腊/双算体等，Unicode 类别 L*）→ 保持默认斜体；其余 → 正体"""
+    import unicodedata
+    return unicodedata.category(ch).startswith('L')
+
+
+def _split_letter_segments(text):
+    """把文本切成 [(是否字母段, 片段), ...]，同类字符合并成一段"""
+    segs = []
+    for ch in text:
+        cls = _char_is_letter(ch)
+        if segs and segs[-1][0] == cls:
+            segs[-1][1] += ch
+        else:
+            segs.append([cls, ch])
+    return [(cls, s) for cls, s in segs]
+
+
+def _make_run(M, text, upright, base_rPr=None):
+    """构造一个 m:r；upright=True 时写 m:sty="p"，base_rPr 为要继承的原 rPr"""
+    r = etree.Element(M + 'r')
+    rPr = None
+    if base_rPr is not None:
+        rPr = etree.fromstring(etree.tostring(base_rPr))
+        r.append(rPr)
+    if upright:
+        if rPr is None:
+            rPr = etree.SubElement(r, M + 'rPr')
+        sty = etree.SubElement(rPr, M + 'sty')
+        sty.set(M + 'val', 'p')
+    t = etree.SubElement(r, M + 't')
+    t.text = text
+    if text != text.strip():
+        t.set(_XML_SPACE, 'preserve')
+    return r
+
+
+def upright_nonletters(root):
+    """把 OMML 里数字/括号/运算符/标点所在的 run 标记为正体（m:sty="p"）。
+
+    - 整个 run 无字母：直接给 run 加 sty="p"
+    - run 内字母与非字母混排（如 f(x)=3x+5）：拆成多个 run，非字母段 sty="p"
+    - 已有显式 m:sty 或 m:nor 的 run：尊重原作者意图，跳过不动
+    """
+    tag = root.tag
+    ns = tag[tag.find('{') + 1:tag.find('}')] if '{' in tag else OMML_NS
+    M = '{%s}' % ns
+
+    for r in list(root.iter(M + 'r')):
+        rPr = r.find(M + 'rPr')
+        if rPr is not None and (rPr.find(M + 'sty') is not None
+                                or rPr.find(M + 'nor') is not None):
+            continue
+        t = r.find(M + 't')
+        if t is None:
+            continue
+        text = t.text or ''
+        if not text:
+            continue
+        segs = _split_letter_segments(text)
+        has_letter = any(cls for cls, _ in segs)
+        if not has_letter:
+            # 整段非字母：原地加 sty="p"
+            if rPr is None:
+                rPr = etree.Element(M + 'rPr')
+                r.insert(0, rPr)
+            sty = etree.SubElement(rPr, M + 'sty')
+            sty.set(M + 'val', 'p')
+            continue
+        if len(segs) == 1:
+            continue
+        # 混排：拆成多个 run
+        new_runs = [_make_run(M, seg, upright=not cls, base_rPr=rPr)
+                    for cls, seg in segs]
+        parent = r.getparent()
+        if parent is None:
+            continue
+        idx = parent.index(r)
+        for i, nr in enumerate(new_runs):
+            parent.insert(idx + i, nr)
+        parent.remove(r)
+    return root
+
+
 def _extract_bundled_xsl():
     """从内嵌的 xsl_bundle（gzip+base64）解出 MML2OMML.XSL。
 
@@ -309,13 +402,18 @@ def latex_to_omml(latex: str, display: str = 'inline') -> bytes:
     result = _get_transform()(doc)
     root = result.getroot()
     etree.cleanup_namespaces(root)
-    # 结构化修复：\underline 退化的 m:limLow 转回 m:bar(pos=bot)
+    # 先做字符串级修复（f(x)= 拆分会产生新的裸 run，必须在其后做正体化）
+    xml = etree.tostring(root, encoding='unicode')
+    xml = postprocess_omml(xml)
+    # 重新解析，再做结构级修复：
+    #   1) \underline 退化的 m:limLow 转回 m:bar(pos=bot)
+    #   2) 数字/括号/运算符/标点正体化（m:sty="p"，Word/WPS 渲染一致）
+    root = etree.fromstring(xml.encode('utf-8'))
     root = postprocess_omml_root(root)
+    root = upright_nonletters(root)
     # 注意：tostring 默认 ASCII 编码会把 ⊆ ∅ 等符号转成 &#8838; 实体，
     # 必须用 unicode 编码保留真实字符，否则 Word 打开后符号可能异常。
     xml = etree.tostring(root, encoding='unicode')
-    # OMML 后处理：修复 XSL 输出的两种瑕疵（f(x)= 被合并、cases 右括号）
-    xml = postprocess_omml(xml)
     return xml.encode('utf-8')
 
 
