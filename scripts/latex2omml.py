@@ -208,18 +208,50 @@ def postprocess_omml_root(root):
     return root
 
 
+def _extract_bundled_xsl():
+    """从内嵌的 xsl_bundle（gzip+base64）解出 MML2OMML.XSL。
+
+    用于受限分发场景：上传平台不允许 .xsl 扩展名时，包里没有
+    MML2OMML.XSL 文件，运行时从这里自动还原。优先写到 scripts/ 目录
+    （可写则下次直接命中 XSL_CANDIDATES），不可写则退到系统临时目录。
+    """
+    try:
+        import base64 as _b64
+        import gzip as _gzip
+        import tempfile as _tmp
+        import xsl_bundle
+    except ImportError:
+        return None
+    data = _gzip.decompress(_b64.b64decode(xsl_bundle.XSL_GZ_B64))
+    try:
+        target = os.path.join(HERE, 'MML2OMML.XSL')
+        with open(target, 'wb') as f:
+            f.write(data)
+        return target
+    except OSError:
+        fd, tmp = _tmp.mkstemp(suffix='.xsl')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        return tmp
+
+
 def _get_transform():
     """懒加载并缓存 XSLT 转换器"""
     global _transform
     if _transform is None:
-        for p in XSL_CANDIDATES:
-            if os.path.exists(p):
-                _transform = etree.XSLT(etree.parse(p))
-                return _transform
-        raise RuntimeError(
-            '找不到 MML2OMML.XSL。请确认 Microsoft Office 已安装，'
-            '或把 MML2OMML.XSL 放到 scripts/ 目录下。'
-        )
+        p = None
+        for cand in XSL_CANDIDATES:
+            if os.path.exists(cand):
+                p = cand
+                break
+        if p is None:
+            p = _extract_bundled_xsl()
+        if p is None:
+            raise RuntimeError(
+                '找不到 MML2OMML.XSL。请确认 Microsoft Office 已安装，'
+                '或把 MML2OMML.XSL 放到 scripts/ 目录下。'
+            )
+        _transform = etree.XSLT(etree.parse(p))
     return _transform
 
 
