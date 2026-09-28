@@ -1,6 +1,14 @@
 ---
 name: latex-omml
+version: 1.1.0
 description: 数学公式与 Word 文档的双向解决方案。当需要在 Word/docx 中生成可编辑的数学公式（分数、根号、上下标、希腊字母、集合符号、矩阵、积分求和），从 PPT/PDF/图片中提取数学符号并还原为 LaTeX，解析 MathType OLE 对象里的 MTEF 二进制还原完整公式结构，或把已有 docx 里 Unicode 硬拼的伪公式（a²+b²≥2ab、A⊆B、√(ab)）批量升级为真正的可编辑公式时使用。触发词：数学公式、LaTeX、OMML、公式转Word、可编辑公式、集合符号、⊆ ∅ ∈、生成讲义、试题排版、公式识别、MathType 替代、讲义公式升级、伪公式、MTEF、Equation Native、MathType 转 LaTeX、OLE 公式提取。
+category: 内容创作
+platforms: [windows, macos, linux]
+license: MIT
+author: goldfish-x
+homepage: https://github.com/goldfish-x/formula-flow
+keywords: [latex, omml, mathml, word, docx, equation, math-formulas, education, wps, mathtype]
+tags: [latex, omml, word, education, equations]
 agent_created: true
 ---
 
