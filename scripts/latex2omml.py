@@ -96,11 +96,89 @@ _MATHML_CHAR_FIX = {
 }
 
 
+def _wrap_bare_bars(mml_root):
+    r"""
+    把同一个 mrow 里「成对的裸竖线 |」显式包进 mrow（原地修改）。
+
+    病根：`|a||b|` 的 MathML 是 mo(|) mi(a) mo(|) mo(|) mi(b) mo(|)，
+    相邻两个 mo(|) 让 MML2OMML.XSL 误判成一个"三分组定界符"
+    （begChr='|' endChr='|' + 两条 sep），把 a、b 全吞掉，
+    最终产出 `<m:d><m:e/><m:e/><m:e/></m:d>` —— 三个空壳，Word 里一片空白，
+    而且**不报错**，所以降级机制完全抓不到。
+
+    修法：按出现顺序把裸竖线两两配对，配成
+        <mrow><mo form=prefix>|</mo>…<mo form=postfix>|</mo></mrow>
+    与 `\left|a\right|` 的 MathML 结构一致，XSL 便能正确生成定界符组。
+
+    保守策略：只处理**全是裸竖线**（无 form 属性）的 mrow，且个数为偶数；
+    已经写过 \left| / \right| 的、奇数个（可能嵌套）的一律不动，保持原行为。
+    """
+    MML = '{http://www.w3.org/1998/Math/MathML}'
+
+    for mrow in list(mml_root.iter(MML + 'mrow')):
+        kids = list(mrow)
+        if not kids:
+            continue
+        # 找出「裸竖线」：文本是 | 且没有被 \left/\right 标记过
+        bare_idx = []
+        for i, k in enumerate(kids):
+            if k.tag != MML + 'mo':
+                continue
+            if (k.text or '').strip() != '|':
+                continue
+            if k.get('form') is not None or k.get('fence') == 'true':
+                continue          # \left|...\right| 的产物，本来就对
+            bare_idx.append(i)
+
+        if len(bare_idx) < 4 or len(bare_idx) % 2:
+            continue              # 单纯 |x| （2 条）XSL 本来就能处理，不折腾
+        # 必须真的存在「相邻两条」（否则是 |a|+|b| 这种，XSL 也没问题），
+        # 但为稳妥：只要这一层有裸竖线成对，就统一显式化，行为等价、更保险
+        pairs = list(zip(bare_idx[0::2], bare_idx[1::2]))
+
+        out = []
+        pair_at = {i: (i, j) for i, j in pairs}
+        close_at = {j: i for i, j in pairs}
+        i = 0
+        while i < len(kids):
+            if i in pair_at:
+                _, j = pair_at[i]
+                wrapper = etree.Element(MML + 'mrow')
+                op, cl = kids[i], kids[j]
+                op.set('stretchy', 'true')
+                op.set('fence', 'true')
+                op.set('form', 'prefix')
+                cl.set('stretchy', 'true')
+                cl.set('fence', 'true')
+                cl.set('form', 'postfix')
+                wrapper.append(op)
+                for k in range(i + 1, j):
+                    wrapper.append(kids[k])
+                wrapper.append(cl)
+                out.append(wrapper)
+                i = j + 1
+            elif i in close_at:
+                # 落单的闭合符号（理论上不会走到这里），原样保留
+                out.append(kids[i])
+                i += 1
+            else:
+                out.append(kids[i])
+                i += 1
+
+        for c in list(mrow):
+            mrow.remove(c)
+        for c in out:
+            mrow.append(c)
+
+    return mml_root
+
+
 def preprocess_mathml(mml_root):
     """
     XSL 转换前的 MathML 修补（原地修改，返回同一个 root）：
     1. 符号码位修正（\\perp 等 latex2mathml 的映射错误）
     2. 给 accent 类 mover/munder 补 accent 属性
+    3. 裸竖线两两配对，避免 |a||b| 被 XSL 吞成空公式
     """
     MML = '{http://www.w3.org/1998/Math/MathML}'
 
@@ -130,6 +208,9 @@ def preprocess_mathml(mml_root):
             # munder(base, under) — 同理
             if _is_accent(kids[1]):
                 node.set(attr, 'true')
+
+    # --- 3. 裸竖线配对（|a||b| 这类，见 _wrap_bare_bars 的说明）
+    _wrap_bare_bars(mml_root)
 
     return mml_root
 
@@ -366,17 +447,38 @@ _LATEX_PREMAP = [
     (r'\\varoiint(?![A-Za-z])', r'\oiint'),
     (r'\\varoiiint(?![A-Za-z])', r'\oiiint'),
     # \unit{m/s^2} -> \mathrm{m/s^2}（允许一层嵌套花括号）
-    (r'\\unit\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', r'\\mathrm{\1}'),
-    (r'\\si\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', r'\\mathrm{\1}'),
+    # 注意替换串必须是**单反斜杠**：premap 用 lambda 原样输出，
+    # 写成 r'\\mathrm{\1}' 会得到字面的 "\\mathrm{\1}"（历史 bug，2026-10 修）
+    (r'\\unit\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', r'\mathrm{\1}'),
+    (r'\\si\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', r'\mathrm{\1}'),
+    # 函数名：latex2mathml 认识 \sin \cos \log \max，但不认识 \arg，
+    # 会**静默**把 "\arg" 当普通文字吐进公式（Word 里显示成斜体 "\arg"）。
+    # 负向断言避免误伤 \argmax 这类自定义命令。
+    # ⚠️ 别用 \operatorname{arg}：它生成 <mo>arg</mo>，XSL 会把它当成**定界符**，
+    #    产出 begChr="arg" 的畸形 m:d（实测 2026-10）；\mathrm 生成 <mi>，安全。
+    (r'\\arg(?![A-Za-z])', r'\mathrm{arg}'),
+    # \vspace 在公式里没有意义，且会把 "\vspace1em" 文本漏进公式，直接剔除
+    (r'\\vspace\*?\{[^{}]*\}', ''),
 ]
 _PREMAP_COMPILED = [(re.compile(p), r) for p, r in _LATEX_PREMAP]
+
+# 替换串里的 \1 \2 组引用
+_GROUP_REF = re.compile(r'\\(\d)')
+
+
+def _expand_repl(repl: str, m) -> str:
+    """把替换串里的 \\1 换成对应捕获组，其余反斜杠原样保留"""
+    if '\\' not in repl:
+        return repl
+    return _GROUP_REF.sub(lambda g: m.group(int(g.group(1))) or '', repl)
 
 
 def premap_latex(latex: str) -> str:
     """转换前把扩展/单位命令重写为核心 LaTeX 命令"""
     for pat, repl in _PREMAP_COMPILED:
-        # 用 lambda 传替换串：replacement 里的 \\circ 等按字面输出，不经转义解析
-        latex = pat.sub(lambda m, r=repl: r, latex)
+        # 用 lambda 传替换串：replacement 里的 \circ 等按字面输出，不经转义解析；
+        # \1 这类组引用在 _expand_repl 里手动展开
+        latex = pat.sub(lambda m, r=repl: _expand_repl(r, m), latex)
     return latex
 
 
@@ -417,6 +519,101 @@ def latex_to_omml(latex: str, display: str = 'inline') -> bytes:
     return xml.encode('utf-8')
 
 
+# ---------------------------------------------------------------- 错误人话化
+class MathConvertError(ValueError):
+    """单个公式转换失败。除了技术信息，还带「原因 + 怎么办」的人话说明。"""
+
+    def __init__(self, latex, cause='', reason='', hint=''):
+        self.latex = latex
+        self.cause = cause
+        self.reason = reason
+        self.hint = hint
+        super().__init__(reason or cause or '公式转换失败')
+
+    def human(self, where=''):
+        loc = f'位置 {where} · ' if where else ''
+        out = [f'[公式没转成] {loc}原文: {self.latex}']
+        if self.reason:
+            out.append(f'  原因：{self.reason}')
+        if self.cause:
+            out.append(f'  技术细节：{self.cause}')
+        out.append('  影响：这一处已按原样保留为文字，文档其余部分不受影响')
+        if self.hint:
+            out.append(f'  怎么办：{self.hint}')
+        return '\n'.join(out)
+
+
+# 引擎支持范围之外的命令：latex2mathml 不报错，直接把命令名当文本吐出来
+_LATEX_LEFTOVER = re.compile(r'\\([A-Za-z]{2,})')
+
+
+def _diagnose(latex, omml_text, exc=None):
+    """根据失败现象归纳「原因 + 怎么办」。返回 (reason, hint, cause)"""
+    if exc is not None:
+        msg = f'{type(exc).__name__}: {exc}'
+        low = str(exc).lower()
+        if 'xsl' in low or '文件' in str(exc) and '找不到' in str(exc):
+            return ('找不到 MML2OMML.XSL（公式转换表），引擎没法工作',
+                    '确认 scripts/ 目录下有 MML2OMML.XSL；没有就重装本 skill，'
+                    '或运行 python scripts/doctor.py 看缺什么', msg)
+        if 'xmlsyntax' in low or 'syntax' in low:
+            return ('这段 LaTeX 本身不合法（括号/环境没闭合最常见）',
+                    '数一下花括号 {} 和 \\left / \\right 是否成对、'
+                    '\\begin{...} 有没有对应的 \\end{...}', msg)
+        return ('转换引擎内部报错', '把这一行的报错贴给维护者；临时可改用更简单的写法', msg)
+
+    if not omml_text.strip():
+        return ('转换结果是一片空白（公式内容被吞了）',
+                '这是已知的边界情况，见 SKILL.md「常见坑」；'
+                '可临时把 |a||b| 写成 \\left|a\\right|\\left|b\\right|', '空公式')
+
+    # 残留 LaTeX 命令 = 该命令不被支持，被当普通文字写进了公式。
+    # 注意 OMML 里命令名可能和后面的变量粘在一起（\foo{x} -> "\foox"），
+    # 所以拿源 LaTeX 里的命令集去对：谁是它的前缀，谁就是没认出来的那个。
+    leftover = _LATEX_LEFTOVER.search(omml_text)
+    if leftover:
+        raw = leftover.group(1)
+        src_cmds = set(re.findall(r'\\([A-Za-z]+)', latex))
+        name = '\\' + raw
+        for c in sorted(src_cmds, key=len, reverse=True):
+            if raw.startswith(c):
+                name = '\\' + c
+                break
+        common = {
+            '\\text': '试试 \\mathrm{...} 或 \\mbox{...}',
+            '\\mbox': '试试 \\text{...} 或 \\mathrm{...}',
+            '\\foo': '把命令换成引擎支持的等价写法',
+        }.get(name, '')
+        return (f'LaTeX 命令 {name} 不被支持，被当成普通文字写进了公式',
+                common or '在 SKILL.md 的「命令支持表」里找等价写法，'
+                          '或用 \\mathrm{} / \\text{} 包住这段内容',
+                f'残留命令 {name}')
+
+    return ('未知原因', '见 SKILL.md「常见坑」', '')
+
+
+def convert_or_explain(latex, display='inline'):
+    """转换公式；失败或出现静默损坏时，抛带人话的 MathConvertError。"""
+    try:
+        omml = latex_to_omml(latex, display)
+    except Exception as e:                                  # noqa: BLE001
+        reason, hint, cause = _diagnose(latex, '', e)
+        raise MathConvertError(latex, cause, reason, hint) from e
+
+    root = etree.fromstring(omml)
+    body = ''.join(t.text or '' for t in root.iter(M + 't'))
+    reason, hint, cause = _diagnose(latex, body, None)
+    # 原文本就没字符（如 \, ）时不追究空公式
+    if not body.strip() and re.search(r'[A-Za-z0-9\u4e00-\u9fff]', latex):
+        raise MathConvertError(latex, cause, reason, hint)
+    if cause.startswith('残留命令'):
+        raise MathConvertError(latex, cause, reason, hint)
+    return omml
+
+
+
+
+
 # ---------------------------------------------------------------- 段落构建
 
 # 匹配 $$...$$（独立）优先于 $...$（行内）
@@ -443,12 +640,14 @@ def split_math(text: str):
     return out
 
 
-def add_paragraph(doc, text, style=None, on_error='text'):
+def add_paragraph(doc, text, style=None, on_error='text', where='', errors=None):
     """
     往 docx 段落里写含 $...$ 公式的文本，公式转成原生 OMML 对象。
 
     on_error: 'text'  公式转换失败时降级为纯文本（推荐，不中断）
               'raise' 直接抛异常
+    where:    出错时用来定位的说明，如 '第 12 段' / '第 3 页第 2 行'
+    errors:   传一个 list，失败信息会追加进去，方便上层汇总
     """
     from docx.oxml import parse_xml
 
@@ -459,18 +658,32 @@ def add_paragraph(doc, text, style=None, on_error='text'):
                 p.add_run(seg['value'])
             continue
         try:
-            omml = latex_to_omml(
+            omml = convert_or_explain(
                 seg['value'],
                 'block' if seg['type'] == 'block' else 'inline'
             )
             p._p.append(parse_xml(omml))
-        except Exception as e:
+        except MathConvertError as e:
             if on_error == 'raise':
                 raise
-            # 降级：保留原始 LaTeX 文本，保证文档不丢内容
             p.add_run(f"[{seg['value']}]")
-            sys.stderr.write(f'[latex2omml] 公式转换失败，已降级为文本: '
-                             f'{seg["value"]!r} -> {e}\n')
+            sys.stderr.write(e.human(where) + '\n')
+            if errors is not None:
+                errors.append(e)
+        except Exception as e:                              # noqa: BLE001
+            if on_error == 'raise':
+                raise
+            # 兜底：连诊断都失败的极端情况，保证文档不丢内容
+            p.add_run(f"[{seg['value']}]")
+            loc = f'位置 {where} · ' if where else ''
+            sys.stderr.write(
+                f'[公式没转成] {loc}原文: {seg["value"]}\n'
+                f'  原因：{type(e).__name__}: {e}\n'
+                f'  影响：这一处已按原样保留为文字，文档其余部分不受影响\n'
+                f'  怎么办：把这一行报错贴给维护者\n'
+            )
+            if errors is not None:
+                errors.append(e)
     return p
 
 
@@ -507,6 +720,11 @@ def selftest():
         (r'\{x\mid x>0\}', '{', '集合构造'),
         (r'\alpha+\beta', 'α', '希腊字母'),
         (r'\int_{0}^{1}f(x)dx', 'm:nary', '积分'),
+        # 回归：紧邻绝对值 |a||b| 曾被 XSL 吞成三个空 <m:e/>，Word 里一片空白
+        (r'|a_{i}||a_{j}|', 'm:sSub', '紧邻绝对值'),
+        # 回归：分段函数右边不能凭空多一个 ")"
+        (r'\begin{cases}1 & x>0\\ 0 & x\leq 0\end{cases}', '<m:endChr m:val=""/>',
+         '分段函数右定界符'),
     ]
     ok = fail = 0
     detail = []
@@ -514,6 +732,11 @@ def selftest():
         try:
             xml = latex_to_omml(latex).decode('utf-8')
             hit = needle in xml
+            # 附加约束：公式里必须有真内容（防「结构对了但内容被吞」）
+            root = etree.fromstring(xml.encode('utf-8'))
+            body = ''.join(t.text or '' for t in root.iter(M + 't'))
+            if hit and name in ('紧邻绝对值',):
+                hit = ('a' in body) and ('i' in body) and ('j' in body)
         except Exception as e:
             hit = False
             xml = str(e)

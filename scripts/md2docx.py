@@ -84,16 +84,28 @@ def convert(md_text, out_path, title=None, font=None):
         doc.add_heading(title, level=0)
 
     blocks = parse_markdown(md_text)
-    blank_pending = False
+    errors = []
+    lineno = 0
     for text, style in blocks:
         if text == '':
-            blank_pending = True
             continue
-        add_paragraph(doc, text, style=style)
-        blank_pending = False
+        add_paragraph(doc, text, style=style, where='第 %d 行' % lineno, errors=errors)
+        lineno += 1
 
-    doc.save(out_path)
-    return out_path
+    try:
+        doc.save(out_path)
+    except PermissionError:
+        base, ext = os.path.splitext(out_path)
+        out_path = base + '_new' + ext
+        doc.save(out_path)
+        sys.stderr.write(
+            '目标文件正被 Word 打开，改存为：%s\n'
+            '（合上 Word 后把 _new 去掉即可）\n' % out_path)
+
+    if errors:
+        print('\n有 %d 个公式没转成，已降级为文字（文档其余部分正常）。'
+              '上面每条都有「原因 + 怎么办」。' % len(errors), file=sys.stderr)
+    return out_path, len(errors)
 
 
 def main():
@@ -125,9 +137,9 @@ def main():
     out = args.output or (
         os.path.splitext(args.input)[0] + '.docx' if args.input else 'output.docx')
 
-    convert(md, out, title=args.title, font=args.font)
+    out, n_err = convert(md, out, title=args.title, font=args.font)
     print(f'已生成: {out}')
-    return 0
+    return 0 if n_err == 0 else 2
 
 
 if __name__ == '__main__':

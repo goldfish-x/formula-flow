@@ -35,6 +35,11 @@ UNI_SUP = {
     '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
     '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
     'ⁿ': 'n', '⁺': '+', '⁻': '-', 'ⁱ': 'i', 'ʲ': 'j',
+    # 上标字母（2026-10-26 补：aᵐ、xᵏ 这类以前会被原样留在公式里）
+    'ᵃ': 'a', 'ᵇ': 'b', 'ᶜ': 'c', 'ᵈ': 'd', 'ᵉ': 'e', 'ᶠ': 'f',
+    'ᵍ': 'g', 'ʰ': 'h', 'ᵏ': 'k', 'ˡ': 'l', 'ᵐ': 'm', 'ᵒ': 'o',
+    'ᵖ': 'p', 'ʳ': 'r', 'ˢ': 's', 'ᵗ': 't', 'ᵘ': 'u', 'ᵛ': 'v',
+    'ʷ': 'w', 'ˣ': 'x', 'ʸ': 'y', 'ᶻ': 'z',
 }
 UNI_SUB = {
     '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
@@ -171,28 +176,70 @@ def _match_paren(s, i):
     return -1
 
 
+SUP_CHARS = set(UNI_SUP)
+
+
+def _take_index(out):
+    """从已输出片段的尾部取连续上标字符，作为根指数。
+
+    处理「次数写在根号左边」的中文习惯写法：ⁿ√a、³√8。
+    早期版本先转 √ 再转上标，结果成了畸形的前置上标 ^{n}\\sqrt{a}。
+    """
+    idx = []
+    while out and len(out[-1]) == 1 and out[-1] in SUP_CHARS:
+        idx.append(UNI_SUP[out.pop()])
+    return ''.join(reversed(idx))
+
+
 def convert_sqrt(s):
-    """√(...) -> \\sqrt{...}"""
+    """√(...) -> \\sqrt{...}；ⁿ√a -> \\sqrt[n]{a}"""
     out, i = [], 0
     while i < len(s):
         if s[i] == '√':
             j = i + 1
+            deg = _take_index(out)          # 必须先取指数，再处理被开方内容
+            inner, nxt = None, None
             if j < len(s) and s[j] == '(':
                 k = _match_paren(s, j)
                 if k > 0:
-                    out.append(r'\sqrt{' + convert_sqrt(s[j + 1:k]) + '}')
-                    i = k + 1
-                    continue
-            m = re.match(r'[0-9A-Za-z]+', s[j:])
-            if m:
-                out.append(r'\sqrt{' + m.group(0) + '}')
-                i = j + len(m.group(0))
-                continue
-            out.append(r'\sqrt{}')
-            i += 1
+                    inner = convert_sqrt(s[j + 1:k])
+                    nxt = k + 1
+            if inner is None:
+                m = re.match(r'[0-9A-Za-z]+', s[j:])
+                if m:
+                    inner = m.group(0)
+                    nxt = j + len(m.group(0))
+                else:
+                    inner, nxt = '', j
+            if deg:
+                out.append(r'\sqrt[' + deg + ']{' + inner + '}')
+            else:
+                out.append(r'\sqrt{' + inner + '}')
+            i = nxt
         else:
             out.append(s[i]); i += 1
     return ''.join(out)
+
+
+def strip_caret_paren(s):
+    """a^(1/n) -> a^{1/n}、a_(i) -> a_{i}（去掉多余的圆括号）"""
+    for _ in range(3):
+        before = s
+        s = re.sub(r'([\^_])\s*\(([^()]*)\)', r'\1{\2}', s)
+        if s == before:
+            break
+    return s
+
+
+def upgrade_paren_base(s):
+    """(\\sqrt[n]{a})^m -> \\left(\\sqrt[n]{a}\\right)^m（括号随内容自动长高）
+
+    注意：只能替换一次，且必须跳过已经带 \\left 的括号，
+    否则会得到 \\left\\left(...\\right\\right) 这种非法嵌套。
+    """
+    return re.sub(r'(?<!\\left)\(([^()]*)\)\s*\^',
+                  r'\\left(\1\\right)^', s)
+
 
 
 def convert_frac(s):
@@ -231,6 +278,9 @@ def unicode_to_latex(text):
     # 2. 分数
     s = convert_frac(s)
 
+    # 2.5 幂指数外多余的圆括号：a^(1/n) -> a^{1/n}
+    s = strip_caret_paren(s)
+
     # 3. Unicode 上下标
     out = []
     for ch in s:
@@ -241,6 +291,13 @@ def unicode_to_latex(text):
         else:
             out.append(ch)
     s = ''.join(out)
+
+    # 3.5 底数带括号的乘方：(\sqrt[n]{a})^m -> \left(...\right)^m
+    s = upgrade_paren_base(s)
+
+    # 3.6 中文教材的 N* / N+ 记法（只在独立出现时替换，不碰变量名）
+    s = re.sub(r'(?<![\\A-Za-z])N\s*\*', r'\\mathbb{N}^{*}', s)
+    s = re.sub(r'(?<![\\A-Za-z])N\s*\+', r'\\mathbb{N}^{+}', s)
 
     # 4. 数学符号（长名优先，避免 ⊆ 被 ⊂ 抢先替换）
     for ch in sorted(SYM2LATEX, key=len, reverse=True):
@@ -312,6 +369,47 @@ def _make_run(text, rpr_copy):
     return r
 
 
+def _inherit_math_size(omml_el, rpr_copy):
+    """让 OMML 里的每个 m:r 继承原 run 的字号。
+
+    m:r 不带 w:rPr 时，Word 会用文档默认字号（11pt），
+    正文 12pt 的文档里公式会明显偏小。这里只继承 sz/szCs，
+    字体仍固定 Cambria Math（数学字体不该跟着正文变）。
+    注意 schema 顺序：m:rPr 必须在 w:rPr 之前，w:rPr 在 m:t 之前。
+    """
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from copy import deepcopy
+
+    if rpr_copy is None:
+        return
+    sz = rpr_copy.find(qn('w:sz'))
+    szcs = rpr_copy.find(qn('w:szCs'))
+    if sz is None and szcs is None:
+        return
+
+    M = '{http://schemas.openxmlformats.org/officeDocument/2006/math}'
+    W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    for r in omml_el.iter(M + 'r'):
+        rpr = OxmlElement('w:rPr')
+        fonts = OxmlElement('w:rFonts')
+        fonts.set(qn('w:ascii'), 'Cambria Math')
+        fonts.set(qn('w:hAnsi'), 'Cambria Math')
+        rpr.append(fonts)
+        if sz is not None:
+            rpr.append(deepcopy(sz))
+        if szcs is not None:
+            rpr.append(deepcopy(szcs))
+        old = r.find(W + 'rPr')
+        if old is not None:
+            r.remove(old)
+        mrpr = r.find(M + 'rPr')
+        if mrpr is not None:
+            mrpr.addnext(rpr)
+        else:
+            r.insert(0, rpr)
+
+
 def apply_upgrade(path, min_level='mid', backup=False, verify=True,
                   outdir=None):
     """
@@ -364,7 +462,9 @@ def apply_upgrade(path, min_level='mid', backup=False, verify=True,
                     skipped += 1
                     continue
                 try:
-                    new_els.append(parse_xml(latex_to_omml(latex)))
+                    el = parse_xml(latex_to_omml(latex))
+                    _inherit_math_size(el, rpr_copy)
+                    new_els.append(el)
                     ok += 1
                 except Exception as e:
                     new_els.append(_make_run(content, rpr_copy))
@@ -392,12 +492,63 @@ def apply_upgrade(path, min_level='mid', backup=False, verify=True,
     return out, ok, fail, skipped
 
 
+# ---------------------------------------------------------------- 自测
+
+SELFTEST_CASES = [
+    # (原始伪公式, 期望 LaTeX 片段, 说明)
+    ('√((a²+b²)/2) ≥ (a+b)/2 ≥ √(ab) ≥ 2/(1/a+1/b)',
+     r'\sqrt{\frac{a^{2}+b^{2}}{2}} \geq \frac{a+b}{2} \geq \sqrt{ab} \geq \frac{2}{\frac{1}{a}+\frac{1}{b}}',
+     '均值链：根号套分数 + 分母套分数'),
+    ('a^(1/n) = ⁿ√a',
+     r'a^{\frac{1}{n}} = \sqrt[n]{a}',
+     'a^(1/n) 不能出现圆括号；ⁿ√a 不能变成前置上标'),
+    ('a^(m/n) = ⁿ√(aᵐ) = (ⁿ√a)ᵐ',
+     r'a^{\frac{m}{n}} = \sqrt[n]{a^{m}} = \left(\sqrt[n]{a}\right)^{m}',
+     'Unicode 上标字母 ᵐ + 括号底数自动长高'),
+    ('a>0, m,n∈N*, n>1',
+     r'a>0, m,n \in \mathbb{N}^{*}, n>1',
+     '中文教材的 N* 记法'),
+    ('³√8 = 2', r'\sqrt[3]{8} = 2', '³√ 是立方根，不是 3 次方'),
+    ('(a+b)^2 = a^2+2ab+b^2',
+     r'\left(a+b\right)^2 = a^2+2ab+b^2', '底数括号随内容长高'),
+]
+
+
+def selftest():
+    """回归自测：转换规则 + 转 OMML 不报错、非空。"""
+    ok = True
+    for raw, want, why in SELFTEST_CASES:
+        got = unicode_to_latex(raw)
+        if got != want:
+            ok = False
+            print(f'✗ {why}')
+            print(f'    原文: {raw}')
+            print(f'    期望: {want}')
+            print(f'    实际: {got}')
+            continue
+        # 再确认能转成非空 OMML
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from latex2omml import convert_or_explain
+            xml = convert_or_explain(got, 'inline').decode('utf-8')
+            if '<m:t>' not in xml and '<m:t ' not in xml:
+                ok = False
+                print(f'✗ {why} -> 转出的 OMML 没有文本（空公式）')
+        except Exception as e:
+            ok = False
+            print(f'✗ {why} -> 转 OMML 失败: {type(e).__name__}: {e}')
+    print('upgrade_math 回归自测:', 'PASS' if ok else 'FAIL')
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
     ap = argparse.ArgumentParser(
         description='把 docx 里 Unicode 硬拼的伪公式升级为 Word 原生公式')
-    ap.add_argument('target', help='docx 文件或目录')
+    ap.add_argument('target', nargs='?', help='docx 文件或目录')
+    ap.add_argument('--selftest', action='store_true',
+                    help='跑转换规则回归自测（不需要输入文件）')
     ap.add_argument('--apply', action='store_true', help='实际写入（默认只读）')
     ap.add_argument('--min-level', choices=['high', 'mid'], default='mid')
     ap.add_argument('--sample', type=int, default=0, help='打印 N 条转换抽样')
@@ -405,6 +556,11 @@ def main():
     ap.add_argument('--outdir', help='输出到指定目录（默认在原文件旁生成 '
                                      '_公式升级.docx）')
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
+    if not args.target:
+        ap.error('需要给出 docx 文件或目录（或用 --selftest）')
 
     if os.path.isdir(args.target):
         import glob

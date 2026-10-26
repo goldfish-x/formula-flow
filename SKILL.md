@@ -1,6 +1,6 @@
 ---
 name: latex-omml
-version: 1.1.2
+version: 1.1.4
 slug: latex-omml
 displayName: 公式美化大师
 summary: 把数学公式变成 Word 里真正可编辑的对象——LaTeX 直接生成、MathType/PDF 无损还原、伪公式批量升级，数字与括号正体、字母斜体，符合试卷排版观感。
@@ -113,6 +113,15 @@ python scripts/upgrade_math.py "第4讲.docx" --apply --min-level high
 **已实测**：16 讲高中数学讲义，866 处伪公式 → 真公式，
 中文内容 100% 一致、加粗零丢失、0 失败。
 
+**改规则前后先跑自测**（覆盖 `a^(1/n)`、`ⁿ√a`、`aᵐ`、`N*`、`³√8` 等易错写法）：
+
+```bash
+python scripts/upgrade_math.py --selftest
+```
+
+**边界**：它只处理 run 里的**文字**，`MathType OLE 对象`（`w:object`）
+原样留着不动——那种要另走「方式四」的 MTEF 路线。
+
 ### 方式四：MathType 文档 → LaTeX（免 OCR，带完整结构）
 
 讲义里的公式如果是 **MathType OLE 对象**（不是图片、不是 Unicode 硬拼），
@@ -148,26 +157,43 @@ python scripts/mtef2docx.py "C:\讲义目录" --apply --outdir "C:\输出"
 ### 方式五：自检
 
 ```bash
-python scripts/latex2omml.py        # 跑 12 项核心符号测试
+python scripts/doctor.py            # 环境体检（推荐先跑这个）
+python scripts/latex2omml.py        # 跑 14 项核心符号测试
 python scripts/md2docx.py --selftest
 python scripts/mtef.py --selftest   # MTEF 解析器自检
+python scripts/upgrade_math.py --selftest   # 伪公式转换规则自测
+python scripts/check_omml_delims.py --selftest  # 定界符陷阱（带负例）
 ```
+
+`doctor.py` 逐项检查 Python 版本、必需/可选依赖、内置转换表、平台能力和端到端自检，
+缺什么直接给安装命令；`--fix` 可以自动把缺的必需依赖装上，`--json` 便于自动化。
 
 ---
 
 ## 环境
 
-依赖（见 `requirements.txt`，可用 `install.cmd` 一键装到本目录 `.venv`）：
+依赖（见 `requirements.txt`，Windows 用 `install.cmd`、macOS/Linux 用 `install.sh`
+一键装到本目录 `.venv`）：
 
 - `lxml` 5.4+（XSLT 转换）
 - `python-docx` 1.2+（docx 读写）
 - `latex2mathml` 3.81+（LaTeX → MathML）
 
+可选（缺了不影响公式转换）：
+
+- `pdfplumber` — PDF 转 Word
+- `pymupdf` / `pypdfium2` — 扫描件 PDF 导出成图片
+- `olefile` — 解 MathType OLE 包（不装走内置解析器）
+- `pillow` — 插图处理
+
 如果报 `ModuleNotFoundError`，用虚拟环境里的解释器跑：
 
 ```
-.venv\Scripts\python.exe scripts\md2docx.py input.md -o output.docx
+.venv\Scripts\python.exe scripts\md2docx.py input.md -o output.docx   # Windows
+.venv/bin/python scripts/md2docx.py input.md -o output.docx           # macOS/Linux
 ```
+
+不确定环境对不对，先跑 `python scripts/doctor.py`，它会告诉你缺什么。
 
 ---
 
@@ -320,11 +346,21 @@ for n in z.namelist():
 
 ### EMF 图元 → 图片
 
-用 `scripts/emf2png.py`（纯 GDI+ ctypes，不依赖 ImageMagick）：
+用 `scripts/emf2png.py`，**跨平台**：
 
 ```bash
 python scripts/emf2png.py emf_dir/ png_dir/
+python scripts/emf2png.py --doctor      # 看当前平台用哪个后端
 ```
+
+| 平台 | 后端 |
+|---|---|
+| Windows | 系统 GDI+（ctypes 直调，零依赖） |
+| macOS / Linux | 自动找 `soffice`（LibreOffice）或 `inkscape` |
+| 都没有 | **不崩溃**，返回 `failed: ...` 并提示装哪个 |
+
+> 老讲义的 WMF 公式其实**不必转图** —— `wmf_symbols.py` 纯 Python 解析 WMF 的
+> `META_EXTTEXTOUT` 记录，直接把字符抠出来，Windows/macOS/Linux 都能用，且零误识。
 
 ### 缩略图（关键步骤：让模型能看清图）
 
@@ -456,12 +492,25 @@ python scripts/verify_docx.py output.docx     # 校验：公式数/残留/zip �
 ### 已知边界
 
 - 保存目标若在 Word 中打开会 PermissionError，脚本自动另存为 `*_new.docx`
-- 跨页表格、旋转文本、真正的扫描件不在覆盖范围内
+- 跨页表格、旋转文本不在覆盖范围内
+- **扫描件会自动识别并拦下**：脚本检测到整份 PDF 可读字符数接近 0 时，
+  不会硬转出一份空文档，而是把每页导出成 PNG、打印下一步该走哪条路
+  （详见下一节）。确认 PDF 其实有文字层时可用 `--ignore-scanned` 强行转。
 
 ## 纯扫描件 PDF → 可编辑 Word（多模态路线）
 
 上面两节针对矢量 PDF；**纯扫描件（整页是图）没有文本层**，走这条完整路线。
 7 页扫描试卷实测：原生公式 129 行内 + 11 独立、0 空公式、0 降级残留。
+
+> **第 0 步已经自动化了**：直接对扫描件跑 `pdf2docx_math.py`，
+> 它会检测到「没有文字层」，把每页按 200dpi 导出成 `xxx_pages/page_001.png`，
+> 并打印后续指引（退出码 3，不会产出空 docx）。
+> 也就是说下面的「渲染」一步不用自己写代码了。
+
+```bash
+python scripts/pdf2docx_math.py 试卷.pdf
+# → 试卷_pages/page_001.png ... 并提示走图片识别流程
+```
 
 1. **渲染**：`pymupdf` 按 **200dpi** 整页转 PNG（太低识别不准，太高文件巨大）
 2. **逐页识别**：多模态逐页转写为 Markdown（`$...$`/`$$...$$` 公式 + 题号结构）
@@ -608,8 +657,27 @@ raw[28] == 5   -> MathType v5，本解析器能解
 raw[28] == 3   -> 公式编辑器 3.0，不支持
 ```
 
-**怎么救**：用 Word 打开该文档 → 双击公式 → 「公式 → 转换为新格式」
-（或全选后「公式 → 全部转换」）→ 存盘。转换后就变成 MathType 兼容格式了。
+**怎么救**（两条路，按有没有装 Office 选）：
+
+**A. 装了 Word**：打开文档 → 双击公式 → 「公式 → 转换为新格式」
+（或全选后「公式 → 全部转换」）→ 存盘，之后 `mtef2docx.py` 就能解析了。
+
+**B. 没装 Office / 不想一个个点**：用 `scripts/mtef_v3_probe.py`——
+它不解析 v3，而是把「判定公式所需的一切」一次性摆出来：
+
+```bash
+python scripts/mtef_v3_probe.py 文档.docx [-o 输出目录]
+```
+
+输出：每个对象的 MTEF 版本、渲染成 PNG 的公式图、从 WMF 图元**精确提取的字符**
+（不是 OCR，`<` `=` `+` 这类不会被认错）、以及 `probe.json` 清单。
+
+然后看 PNG 把公式写成 LaTeX → `latex_to_omml()` → 替换原 `w:object` 所在的 run。
+替换时三个要点（2026-10-26 实测，见常见坑第 11 条）：
+1. 清空段落内容时保留 `w:pPr` 与 `w:bookmarkStart/End`，否则缩进、书签全丢；
+2. 完工后 `doc.part.drop_rel(rId)` 把 OLE（rId→embeddings）和呈现图（rId→media）
+   两条关系一起删掉，否则包里留下孤儿部件；
+3. 公式 run 要补 `w:rPr` 的 `sz`，否则 Word 用默认 11pt，比正文小一圈。
 
 实测全库 8521 个对象里只有 24 个是 v3（集中在 7 份文档），影响很小。
 
@@ -685,6 +753,19 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
 
 ## 常见坑
 
+> **2026-10 起，失败会讲人话。** 转换失败的 stderr 不再是一串异常栈，而是：
+>
+> ```
+> [公式没转成] 位置 第 12 段 · 原文: \foo{x}
+>   原因：LaTeX 命令 \foo 不被支持，被当成普通文字写进了公式
+>   影响：这一处已按原样保留为文字，文档其余部分不受影响
+>   怎么办：在 SKILL.md 的「命令支持表」里找等价写法，或用 \mathrm{} 包住
+> ```
+>
+> 程序里想要结构化信息，catch `latex2omml.MathConvertError`（带 `.latex` /
+> `.reason` / `.hint`）。它同时覆盖**静默损坏**：转出来是空公式、或公式里
+> 残留未识别的 `\命令`，都会主动报，不再悄悄变成空白。
+
 1. **`\subsetneq` 和 `\subsetneqq` 不同**
    `\subsetneq` 是 ⫋ 的简写变体，`\subsetneqq` 是标准真子集 ⫋。教材通用后者。
 
@@ -704,14 +785,31 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
    单个公式出错时保留 `[原始LaTeX]` 文本并在 stderr 报警，**不会中断整个文档**。
    看到方括号内容就说明那个公式没转成，去查 stderr。
 
-7. **相邻的绝对值 / 竖线 fence 会静默变空公式（2026-09 实测）**
+7. **相邻的绝对值曾静默变空公式（2026-09 实测，2026-10 已修复）**
+
    `|a_{i}||a_{j}|`、`|a||b|` 这类**两段 `|...|` 直接相连**的写法，
-   `latex_to_omml` **不报错**，但产出的 `m:oMath` 是空壳（没有任何 `m:t` 文本），
-   在 Word 里就是一片空白 —— 降级机制完全抓不到它，只能靠回读校验发现。
-   - **正确写法**：用 `\left|...\right|` 成对包裹，即
-     `\left|a_{i}\right|\left|a_{j}\right|`（实测输出 `aiaj`，正常）。
-   - **无效的绕过**：在中间插 `\,` `\;` `~` 都没用，一样是空的。
-   - 单个 `|a|`、被运算符隔开的 `|x|+|y|`、`|a|<|b|` 都正常，只有**紧邻**才翻车。
+   `latex_to_omml` **不报错**，但产出的 `m:oMath` 是空壳，Word 里一片空白
+   —— 降级机制完全抓不到，只能靠回读校验发现。
+
+   **根因**（看清楚，别往 LaTeX 侧找补）：MathML 里是四个裸 `<mo>|</mo>`，
+   MML2OMML.XSL 看到相邻两条竖线，误判成一个「三分组定界符」
+   （`begChr='|' endChr='|'` + 两条 sep），把内容全吞了，只剩
+   `<m:d><m:e/><m:e/><m:e/></m:d>` 三个空壳。
+
+   **修复**（`latex2omml.py` 的 `_wrap_bare_bars`，在 MathML 预处理阶段）：
+   把同一 mrow 里的裸竖线**按出现顺序两两配对**，包成
+   `<mrow><mo form=prefix>|</mo>…<mo form=postfix>|</mo></mrow>`，
+   与 `\left|a\right|` 的 MathML 结构一致，XSL 便能正确生成两个定界符组。
+   保守起见只处理「全是裸竖线且个数为偶数」的 mrow，已写 `\left|` 的不动。
+
+   - **现在 `|a||b|` 直接可用**（实测输出 `ab`、2 个 `m:d`）；
+     `|a_{i}||a_{j}|` 输出 `aiaj`、2 个 `m:d`。
+   - **仍在的边界**：`|a+b|`、`|a-b|` 会把中间那个运算符写成 `m:sepChr`（分隔符），
+     视觉上仍是 `|a+b|`、不会丢字，但结构不是普通 run。在意编辑体验就用
+     `\left|a+b\right|`。
+   - **无效的绕过**：在中间插 `\,` `\;` `~` 都没用（照样是空的），别再试了。
+   - **回归防线**：`check_omml_delims.py --selftest` 已加负例，
+     一旦有人改坏 `_wrap_bare_bars`，自测立刻 FAIL。
    - **同类静默空公式还有 `\underline{\qquad}`**（2026-09-13 实测）：
      `$\underline{\qquad}$` 单独成式时 `m:t` 数为 0，Word 里直接是空白；
      写进句子里（`$a\ \underline{\qquad}\ b$`）虽不报错，但**不生成 `m:uLn`**、
@@ -746,8 +844,18 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
      `begChr 非空且 endChr 缺失`、`endChr 非空且 begChr 缺失`，都是必坏。
      （`begChr=''` + 无 endChr 是**正常**的半开区间写法，别误报。）
      `--selftest` 带负例测试：故意复现旧 bug，检测器必须抓到。
-   - **修复**：改 `latex2omml.py` 的 `postprocess_omml`（别在生成后去删元素），
+   - **修复（引擎侧）**：改 `latex2omml.py` 的 `postprocess_omml`（别在生成后去删元素），
      改完必须重跑 `--selftest` + 重建文档 + 对照旧版 docx 确认可疑数归零。
+   - **修复（成品侧）**：手头已经有坏掉的 docx（别人给的、旧版本生成的、WPS 产出的），
+     不用重新生成，直接补回去：
+     ```bash
+     python scripts/fix_omml_delims.py 文件.docx              # 另存 文件名_fixed.docx
+     python scripts/fix_omml_delims.py 目录/ --inplace        # 批量原地改（自动 .bak 备份）
+     ```
+     它只补**能确定配对**的那几种（`{` `|` `‖` `⌈` `⌊` `⟨` `⌜` `⟦` `〖`），
+     `[` `(` 这类可能是半开区间的**一律不碰**（免得把 `[-2,4)` 改成 `[-2,4]`）。
+     大括号还看 `sepChr`：`sepChr=','` 的是集合 `{1,2,3}` → 补 `}`；
+     `sepChr=''` 的是 cases → 补空串（不画右括号）。
    - **实测影响面**：本次一册汇编里 4 处中招（2015AB10、2006\*3 两组不等式组、
      2004\*三 的 f(n) 分段函数），另 176 个定界符组不受影响。
      所以**不要以为只有一处**，改完必须全库扫。
@@ -769,6 +877,118 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
     XML 级校验（verify_docx）完全不查图片内容，全过——直到渲染成图才肉眼发现。
     规矩：**每裁一幅就 Read 回看**，确认四边无相邻文字/题号/选项残留；
     下边界按"图形最外层标注"收口（V 轴标签一度被裁掉，回看才纠正）。
+
+12. **`upgrade_math.py` 的伪公式转换：四个静默错（2026-10-26 实测，已修复）**
+
+    用 `√((a²+b²)/2)`、`a^(1/n) = ⁿ√a`、`(ⁿ√a)ᵐ` 这类中文教材写法做测试，
+    转换结果**不报错**但都是错的：
+
+    | 原文 | 旧版输出（错） | 现在（对） | 病根 |
+    |---|---|---|---|
+    | `a^(1/n)` | `a^(\frac{1}{n})` → 渲染出多余圆括号 | `a^{\frac{1}{n}}` | 只处理 `^`，没处理 `^(...)` |
+    | `ⁿ√a` | `^{n}\sqrt{a}` → 前置上标，畸形 | `\sqrt[n]{a}` | 先转 √ 再转上标，顺序反了 |
+    | `aᵐ` | 把 `ᵐ` 原样留在公式里 | `a^{m}` | `UNI_SUP` 只有数字和 n/i/j，没有字母 |
+    | `N*` | `N*`（斜体 N 加星号） | `\mathbb{N}^{*}` | 缺教材记法规则 |
+
+    修复要点（都在 `upgrade_math.py`）：
+    - `_take_index()`：处理 √ 之前，先**回退已输出片段**取连续上标字符当根指数。
+      于是 `³√8` → `\sqrt[3]{8}`，而不是"3 次方再开平方"。
+    - `strip_caret_paren()`：`^(...)` `_(...)` 去括号。必须在**分数转换之后**跑，
+      此时 `a^(1/n)` 里已是 `\frac{1}{n}`，整体包进 `^{}` 不会破。
+    - `upgrade_paren_base()`：`(X)^m` → `\left(X\right)^m`。**只能替换一次**，
+      且用 `(?<!\\left)` 跳过已包裹的括号，否则出 `\left\left(...\right\right)`。
+    - `_inherit_math_size()`：转出的 `m:r` 补 `w:rPr/sz` 继承原 run 字号，
+      否则 Word 用默认 11pt，12pt 正文里的公式明显偏小。
+    - **回归防线**：`python scripts/upgrade_math.py --selftest`（6 组正例，
+      覆盖上面四条），改完必跑。
+
+    另：`upgrade_math` 只处理 run 里的文字，**不会碰 MathType OLE 对象**——
+    老公式要另走 `mtef2docx.py`（v5）或 `mtef_v3_probe.py`（v3）。
+
+13. **上标"看着偏大"：大小由 run 的 `w:sz` 决定，不会随底数自动统一（2026-10-26 实测）**
+
+    同一份文档里，11pt 段落中的 `x^{2}` 上标，明显比 12pt 段落中的 `a^{1/n}` 小一圈。
+    病根不在 LaTeX、也不在 OMML 结构：`upgrade_math._inherit_math_size()` 让公式 run
+    继承原段落字号（这一步是对的，否则公式会比正文小一圈），**但 `m:sup` 里的 run
+    也一并继承了 24（12pt）**。Word 渲染上标时是按这个基准再缩放的，于是
+    24 基准的上标永远比 22 基准的大约 9%；分数上标（`1/n`）自身还有一层分数缩放，
+    差距被放大后最扎眼。
+
+    **判据**：别看"上标有没有自动缩小"，直接看 sup/sub/deg 里 run 的 `w:sz` 绝对值，
+    拿文档里已被认可的参照物（如正文 11pt 段落的 `x²`）来对。
+
+    **修法**（只动上标子树，底数不碰）：
+
+    ```bash
+    python scripts/clamp_script_sz.py 文档.docx --list             # 先看各段字号分布
+    python scripts/clamp_script_sz.py 文档.docx --paras 2 --sz 22  # 只改第 3 段（0 起）
+    python scripts/clamp_script_sz.py 文档.docx --sz 22 --inplace  # 全文统一（自动 .bak）
+    python scripts/clamp_script_sz.py 文档.docx --paras 2 --sz 20 --exact --inplace  # 可升可降，来回调档
+    ```
+
+    `--exact` 是「直接设为该值」，不加就是「只降不升」。用户改口"18 太小，定 20"时用
+    `--exact` 原地改，**不要**回到原稿重新生成（重生成会丢掉之前别的修正）。
+    往返 20→24→20 实测无损。
+
+    实现上按 `<m:sup>` / `<m:sub>` / `<m:deg>` 做**标签配对扫描**（不是贪婪正则，
+    嵌套 sup 也不会切错），只替换子树里的 `w:sz`，底数、运算符、括号原样保留。
+    改完用 `--list` 复核：目标段应变成「多数原字号 + 若干新字号」的混合分布。
+
+    **别做的事**：为了统一上标就把整段公式字号改小 —— 底数跟着缩，整条公式会比正文瘦一圈，
+    越修越难看。只钳 sup/sub/deg。
+
+    **参照 MathType 原稿定档（2026-10-26 追加）**
+
+    用户说"看着还是大"时，别只在 9% 这个数字上纠缠，先分清是**字号**问题还是**结构**问题：
+
+    | 现象 | 真因 | 对策 |
+    |---|---|---|
+    | 同文档两处上标一大一小 | 段落基准字号不同（24 vs 22） | 把 sup/sub/deg 的 sz 钳到同一值 |
+    | 单个上标仍嫌大 | 参照物本身偏大 | 按下面的权重比重定档 |
+    | 分数上标"一大坨" | 分数块高天然是单字符的 2 倍 | 整体降一档，别只盯字号百分比 |
+
+    MathType 的视觉权重比（可直接当验收标准）：
+    **主体 : 上标 : 分式 : 根指数 = 1.00 : 0.79 : 0.85 : 0.72**
+
+    量用户给的原稿截图：`上标墨迹高 ÷ 底数墨迹高`。⚠️ 10px 级小字在抗锯齿下会被
+    "撑胖"1~2px，量出 0.78 时真实值就是 0.79 —— 别当成"偏大"再去修。
+
+    落到 OMML 的档位（12pt 正文 = sz 24，每档 2 半磅 = 1pt）：
+
+    | sz | 相对底数 | 观感 |
+    |---|---|---|
+    | 24 | 1.00 | 与底数同大，基本不成上标 |
+    | 22 | 0.92 | 对齐 11pt 段落的 x²，多数情况够用 |
+    | 20 | 0.83 | 略紧 |
+    | 18 | 0.75 | 贴近 MathType 的 0.79，分数上标也压得下来 |
+    | 16 | 0.67 | 偏小，一般只给根指数 |
+
+    **本机渲染验证的边界**：Windows + Office16，`Word.Application` 的 COM 起不来
+    （`pywintypes.com_error -2146959355 / CO_E_SERVER_EXEC_FAILURE`，加沙箱白名单也一样），
+    机器上也没有 LibreOffice —— docx→PDF→PNG 这条路走不通。要定档只能：
+    ①量用户给的参照截图；②改完让用户目视一句话反馈。**不要**靠 `w:sz` 数值硬推渲染像素。
+
+14. **同一层的上标，分数比单字符大一圈 —— Word 只缩放"直接的 run"（2026-10-26 实测）**
+
+    现象：`a^{m/n}` 里的 m，和 `(\sqrt[n]{a})^{m}` 里的 m，明明都是 `w:sz=20`，
+    渲染出来前者比后者大 **1.5 倍**（用户截图实测：分子 m 高 9px，上标 m 高 6px）。
+
+    真因：Word 对 `m:sup` / `m:sub` 里**直接挂着的 `m:r`** 会再乘一次脚本缩放
+    （约 0.65），但对 `m:f` 里的 `m:num` / `m:den` **不做这个缩放**。
+    所以同样写 20，单字符实际渲染成 13 半磅，分数里的分子分母仍是 20 半磅。
+
+    修法：只给"上标里的分数"做字号补偿，别去动同层的单字符：
+
+    ```bash
+    # 上标统一 20，其中分数按 20×0.65≈13 补偿
+    python scripts/clamp_script_sz.py 文档.docx --paras 2 --sz 20 --exact --frac-sz 13 --inplace
+    ```
+
+    `--frac-sz` 只作用于 sup/sub 子树内 `m:f` 的 run，识别是标签配对扫描，嵌套分数也不会切错。
+    经验值 **frac_sz ≈ 目标 sz × 0.65**；实测 20/13 后，分子分母与上标单字符同高。
+
+    ⚠️ 反过来的坑：如果为了"让分数变小"把整个 sup 降到 13，单字符 m 会跟着掉到 8.5，
+    变成"分数对上了、旁边 m 太小"。**必须分两档写**。
 
 ---
 
@@ -803,19 +1023,25 @@ latex-omml/
 ├── SKILL.md                   本文件
 ├── INSTALL.md                 安装说明（换机器看这个）
 ├── install.cmd                Windows 一键安装（建 .venv + 装依赖 + 自检）
+├── install.sh                 macOS/Linux 一键安装（同上）
 ├── requirements.txt           依赖清单：lxml / latex2mathml / python-docx
 ├── scripts/
-│   ├── latex2omml.py          核心引擎（LaTeX→OMML，含自检）
+│   ├── doctor.py              环境体检：版本/依赖/XSL/平台能力/端到端，缺什么给安装命令
+│   ├── latex2omml.py          核心引擎（LaTeX→OMML，含自检与人话报错）
 │   ├── md2docx.py             CLI：Markdown+LaTeX → docx
 │   ├── upgrade_math.py        CLI：已有 docx 的伪公式批量升级为真公式
 │   ├── audit_math.py          CLI：体检 docx，统计真公式/图片公式/伪公式
-│   ├── emf2png.py             EMF/WMF 图元 → PNG（识别侧用）
+│   ├── emf2png.py             EMF/WMF 图元 → PNG（Windows GDI+ / macOS 走 LibreOffice）
 │   ├── mtef.py                CLI：MathType OLE → MTEF v5 解析 → LaTeX（含自检）
 │   ├── mtef2docx.py           CLI：整份讲义的 MathType 对象批量换成原生公式
-│   ├── wmf_symbols.py         CLI：从 MathType WMF 图元精确提取符号（不靠 OCR）
-│   ├── pdf2docx_math.py       CLI：矢量文本型 PDF → docx，公式还原为原生 OMML
+│   ├── mtef_v3_probe.py       CLI：MTEF v3 探查（版本/渲染图/图元字符），给不支持的格式一条路
+│   ├── wmf_symbols.py         CLI：从 MathType WMF 图元精确提取符号（跨平台）
+│   ├── pdf2docx_math.py       CLI：矢量文本型 PDF → docx；扫描件自动导出页面图
 │   ├── verify_docx.py         校验生成结果：公式数 / 降级残留 / zip 完整性
 │   ├── check_omml_delims.py   体检/回归自测：定界符组 m:d 的 begChr/endChr 默认值陷阱
+│   ├── fix_omml_delims.py     修复成品 docx 里缺失的 endChr（批量/原地/自动备份）
+│   ├── clamp_script_sz.py     钳制上标/下标/根指数字号（对齐参照物，只动 sup/sub/deg）
+│   ├── render_docx_preview.py docx→PDF→PNG 视觉核对（Word COM，受限环境会明确报错）
 │   └── MML2OMML.XSL           微软官方转换表（内置，194KB）
 └── references/
     └── symbols.md             数学符号 LaTeX 速查表

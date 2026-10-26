@@ -8,7 +8,12 @@ PDF -> DOCX 转换器（数学公式输出为 Word 原生可编辑公式 OMML）
   -> 定界符(可伸缩括号) -> 数学/中文分段 -> LaTeX -> OMML
 
 用法:
-  python pdf2docx_math.py <input.pdf> [-o output.docx] [--dump]
+  python pdf2docx_math.py <input.pdf> [-o output.docx] [--dump] [--render-scanned]
+
+⚠️ 本工具**只吃矢量文本型 PDF**（Word/WPS/LaTeX 导出的那种，文字可选中复制）。
+   扫描件、拍照转的 PDF 里只有一张图、没有文字层，几何还原无从下手——
+   检测到这种情况会**自动把每页导出成 PNG**，并告诉你下一步走图片识别流程，
+   而不是硬转出一份空文档。
 """
 import argparse
 import os
@@ -29,6 +34,100 @@ from docx.oxml.ns import qn           # noqa: E402
 from docx.shared import Pt, RGBColor  # noqa: E402
 
 from latex2omml import latex_to_omml  # noqa: E402
+
+
+# ============================================================ 扫描件判定
+class ScannedPDFError(RuntimeError):
+    """PDF 没有文字层（扫描件 / 纯图片 PDF），几何还原无法进行。"""
+
+    def __init__(self, message, imgs=None, pages=0):
+        super().__init__(message)
+        self.imgs = imgs or []       # 已导出的页面 PNG
+        self.pages = pages           # 总页数
+
+
+# 每页少于这么多字符，基本可以断定没有文字层（图表页偶尔会有零星页码）
+_MIN_CHARS_PER_PAGE = 10
+
+
+def looks_scanned(pages):
+    """判断是否为无文字层的扫描件。返回 (是否扫描件, 总字符数, 有字的页数)"""
+    total = sum(len(p['chars']) for p in pages)
+    pages_with_text = sum(1 for p in pages if len(p['chars']) >= _MIN_CHARS_PER_PAGE)
+    if not pages:
+        return True, 0, 0
+    scanned = total < _MIN_CHARS_PER_PAGE * len(pages)
+    return scanned, total, pages_with_text
+
+
+def render_pdf_pages(pdf_path, outdir=None, dpi=200):
+    """把 PDF 每页渲染成 PNG，返回文件路径列表。
+
+    优先 pymupdf，退到 pypdfium2；都没有则返回 []（由调用方给提示）。
+    """
+    base = os.path.splitext(os.path.abspath(pdf_path))[0]
+    outdir = outdir or (base + '_pages')
+    os.makedirs(outdir, exist_ok=True)
+    out = []
+    try:
+        import pymupdf                                  # PyMuPDF
+        doc = pymupdf.open(pdf_path)
+        for i, page in enumerate(doc, 1):
+            pix = page.get_pixmap(dpi=dpi)
+            p = os.path.join(outdir, 'page_%03d.png' % i)
+            pix.save(p)
+            out.append(p)
+        doc.close()
+        return out
+    except ImportError:
+        pass
+    try:
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(pdf_path)
+        scale = dpi / 72.0
+        for i in range(len(pdf)):
+            bitmap = pdf[i].render(scale=scale).to_pil()
+            p = os.path.join(outdir, 'page_%03d.png' % (i + 1))
+            bitmap.save(p)
+            out.append(p)
+        return out
+    except ImportError:
+        return []
+
+
+def _scanned_hint(pdf_path, imgs):
+    lines = [
+        '',
+        '这个 PDF 没有文字层，是扫描件（或拍照转的 PDF）。',
+        '',
+        '  本工具的路线是「读字符几何 → 反推公式结构」，扫描件里只有像素、',
+        '  没有字符，硬转只会得到一份空文档，所以先停下来。',
+        '',
+    ]
+    if imgs:
+        lines += [
+            '  已把每页导出成图片（%d 张）：' % len(imgs),
+            '      %s' % os.path.dirname(imgs[0]),
+            '',
+            '  下一步二选一：',
+            '    ① 交给图片识别流程（推荐，公式仍是 Word 原生公式）：',
+            '         把上面这个目录发给支持看图的助手，说',
+            '         「按编号顺序识别这些图片，合成 Word，公式用 latex-omml 转原生公式」',
+            '         对应的技能是 img-math-pages-to-docx。',
+            '    ② 先 OCR 再转：任何 OCR 工具导出带文字层的 PDF 后，再用本脚本跑。',
+            '',
+        ]
+    else:
+        lines += [
+            '  想把页面导成图片也没成：缺 pymupdf 或 pypdfium2。装一个即可：',
+            '      pip install pymupdf',
+            '',
+        ]
+    lines += [
+        '  如果确认 PDF 其实有文字层（比如只是图片页居多），加 --ignore-scanned 强行转。',
+    ]
+    return '\n'.join(lines)
+
 
 
 # ============================================================ Symbol 字体表
@@ -759,8 +858,19 @@ def row_msize(r, ref):
     return Counter(ms).most_common(1)[0][0] if ms else 12.0
 
 
-def convert(pdf_path, out_path, dump=False):
+def convert(pdf_path, out_path, dump=False, ignore_scanned=False):
     pages = extract(pdf_path)
+
+    # 先判定有没有文字层——扫描件硬转会产出空文档，宁可停下来讲清楚
+    scanned, total_chars, pages_with_text = looks_scanned(pages)
+    if scanned and not ignore_scanned:
+        imgs = render_pdf_pages(pdf_path)
+        raise ScannedPDFError(
+            '扫描件 PDF（共 %d 页，可读字符 %d 个，有文字的页 %d 页）'
+            % (len(pages), total_chars, pages_with_text),
+            imgs=imgs, pages=len(pages),
+        )
+
     doc = Document()
     st = doc.styles['Normal']
     st.font.name = 'Times New Roman'
@@ -1050,8 +1160,19 @@ if __name__ == '__main__':
     ap.add_argument('pdf')
     ap.add_argument('-o', '--out', default=None)
     ap.add_argument('--dump', action='store_true')
+    ap.add_argument('--ignore-scanned', action='store_true',
+                    help='即使检测到无文字层也强行转（一般没用，只为排查）')
     a = ap.parse_args()
     out = a.out or os.path.splitext(a.pdf)[0] + '.docx'
-    p, nmath, nfail = convert(a.pdf, out, dump=a.dump)
+    try:
+        p, nmath, nfail = convert(a.pdf, out, dump=a.dump,
+                                  ignore_scanned=a.ignore_scanned)
+    except ScannedPDFError as e:
+        print('[扫描件] %s' % e, file=sys.stderr)
+        print(_scanned_hint(a.pdf, e.imgs), file=sys.stderr)
+        sys.exit(3)
     print('已生成: %s' % p)
     print('原生公式对象: %d，失败: %d' % (nmath, nfail))
+    if nfail:
+        print('\n有 %d 个公式没转成（已降级为文字，文档不会坏）。'
+              '把 stderr 里的报错贴给维护者，或参考 SKILL.md 的「常见坑」。' % nfail)

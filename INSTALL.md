@@ -3,6 +3,15 @@
 skill 本体只有 **300 KB**，自包含（微软的 `MML2OMML.XSL` 已内置），**不需要装 Office**。
 只需要 Python 3.9+ 和三个第三方库。
 
+> **装完不确定好不好使？** 一句命令体检，缺什么它直接告诉你装什么：
+>
+> ```bash
+> python scripts/doctor.py        # 也可以加 --fix 直接把缺的装上
+> ```
+>
+> 看到「结论：全部就绪，可以直接用」就成了。可选组件（PDF 转 Word、扫描件导出、
+> 图元转图）缺失**不影响**公式转换主功能。
+
 ---
 
 ## Windows（推荐，一键）
@@ -28,18 +37,30 @@ skill 本体只有 **300 KB**，自包含（微软的 `MML2OMML.XSL` 已内置�
 
 ---
 
-## macOS / Linux（手动）
+## macOS / Linux（一键）
+
+```bash
+bash install.sh
+```
+
+它和 `install.cmd` 做同样的事：建 `.venv` → 装依赖（先清华源，失败自动切官方源）
+→ 跑 `scripts/doctor.py` 体检。装完用 `.venv/bin/python` 跑脚本。
+
+### 或者手动来（想自己控制环境的话）
 
 ```bash
 cd latex-omml
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python scripts/latex2omml.py      # 自检，应看到 12/12
+python scripts/doctor.py          # 体检，应看到「全部就绪」
 ```
 
-> macOS 上的 `emf2png.py` 依赖 GDI+，**用不了**（WMF/EMF 转 PNG 仅限 Windows）。
+> macOS 上的 `emf2png.py` 默认用不了 GDI+，但**不会报错崩掉**：
+> 它会自动去找 LibreOffice(`soffice`) 或 Inkscape，找到就用它们转；
+> 都没有则明确告诉你装哪个（`brew install --cask libreoffice`）。
 > 其余功能（生成 OMML、符号提取、docx 升级）跨平台正常。
+> 老讲义的 WMF 公式其实**不用转图**——`wmf_symbols.py` 纯 Python 就能读出里面的字符。
 
 ---
 

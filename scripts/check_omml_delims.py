@@ -117,6 +117,18 @@ def selftest():
         ok = False
         print('✗ 半开区间 A=[-2,4) 被误判为必坏')
 
+    # 负例：紧邻绝对值 |a||b| 曾被 XSL 吞成三个空 <m:e/>（Word 一片空白）
+    bars = latex_to_omml(r'|a||b|', 'inline').decode('utf-8')
+    root_bars = etree.fromstring(bars.encode('utf-8'))
+    body = ''.join(t.text or '' for t in root_bars.iter(M + 't'))
+    if 'a' not in body or 'b' not in body:
+        ok = False
+        print('✗ 紧邻绝对值 |a||b| 的内容被吞了（Word 里会是空公式）')
+    n_d = sum(1 for _ in root_bars.iter(M + 'd'))
+    if n_d != 2:
+        ok = False
+        print(f'✗ 紧邻绝对值应生成 2 个定界符组，实际 {n_d} 个')
+
     print('回归自测:', 'PASS' if ok else 'FAIL')
     return 0 if ok else 1
 
