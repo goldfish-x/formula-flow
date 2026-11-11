@@ -1,6 +1,6 @@
 ---
 name: latex-omml
-version: 1.1.5
+version: 1.1.6
 slug: latex-omml
 displayName: 公式美化大师
 summary: 把数学公式变成 Word 里真正可编辑的对象——LaTeX 直接生成、MathType/PDF 无损还原、伪公式批量升级，数字与括号正体、字母斜体，符合试卷排版观感。
@@ -165,6 +165,7 @@ python scripts/upgrade_math.py --selftest   # 伪公式转换规则自测
 python scripts/check_omml_delims.py --selftest  # 定界符陷阱（带负例）
 python scripts/scan_symbol_table.py --selftest  # 符号库上游笔误 / 文档一致性
 python scripts/fix_docx_symbols.py --selftest   # 成品 docx 符号替换边界
+python scripts/audit_formula_chars.py --selftest  # 跨格式三级判据 / SYM 覆盖率
 ```
 
 `doctor.py` 逐项检查 Python 版本、必需/可选依赖、内置转换表、平台能力和端到端自检，
@@ -1038,6 +1039,50 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
     54 对文档条目 + 3 条上游补丁生效），`fix_docx_symbols.py --selftest`
     （替换只在 `m:t` 内发生、正文 run 不受影响、默认不动星号）。
 
+16. **只扫 `<m:t>` 会漏掉大半公式；PDF 的相似号会落成 ASCII `~`（2026-11 三目标实测）**
+
+    给两个竞赛文件夹 + 一份 396 页讲义 PDF 做体检，总量是 **63 docx / 47 pdf**：
+    20318 个 OMML 公式、**2736 个 MathType OLE**、1376 个嵌入对象、400 个绘图，
+    还有 11 份纯扫描件 PDF。只用 `fix_docx_symbols.py` 按 `<m:t>` 扫，
+    结果只报 1 处，看着像"没问题"，其实是**漏检**：OLE 公式的字符在 MTEF
+    二进制里，PDF 公式的字符在文字层字体编码里，都不在 `<m:t>`。
+
+    用 `audit_formula_chars.py` 统一盘，并按处置级别分开报（这是关键，
+    一把梭全改会把合法符号改坏）：
+
+    ```bash
+    python scripts/audit_formula_chars.py "C:\资料目录" "试卷.pdf" -r
+    python scripts/audit_formula_chars.py "C:\资料目录" -r --fix   # 只修 ERROR，输出到副本
+    ```
+
+    | 级别 | 内容 | 处置 |
+    |---|---|---|
+    | ERROR | 公式内 `·` U+00B7、`~` U+007E、U+FFFD、私有区码点 | `--fix` 修到副本 |
+    | WARN | 公式内全角标点（实测 149 处中文逗号）、伪上标 `²`、SYM 未覆盖的私有码点 | 只报告 |
+    | INFO | `*` 星号（用户确认不修）、`□` 填空框、**正文里的 `·` 题源间隔号**、OLE/图片公式数、扫描件 | 明确排除 |
+
+    ⚠️ **正文 `·` 绝不是点乘**。实测清北讲义里 265 个 `·` 全是
+    `2021·北京人大附中模拟` 这类题源标注；三目标合计 1366 个正文 `·`，
+    一个都不能改。修复正则严格限定 `<m:t>...</m:t>` 就是为这个。
+
+    **PDF 侧两处真结论**：
+
+    - `pdf2docx_math.SYM` 的 `0x7E` 原先写 `'~'`，但 Adobe Symbol 0x7E 是
+      **similar `∼` U+223C** —— 与坑 15 里 `\sim` 的上游笔误同源。已改为 `∼`。
+      私有区 U+F0XX 由 `remap_symbol()` 减 0xF000 后查 SYM，实测
+      **85 种 / 7126 次覆盖 99.93%**。
+    - 剩下 5 次（U+F08C）来自 **EuclidMathOne / EuclidMathTwo**（MathType 专用字体，
+      字形盒仅 3.3pt 宽，是整除竖线），不属于 Adobe Symbol 编码表。
+      **不要照 Symbol 表硬猜补映射**，那会造出错字。现在 `UNMAPPED_PRIVATE`
+      会记录被静默丢弃的码位，`unmapped_private_report()` 可查，体检脚本会告警。
+      `SYM` 里存在但值为 `''` 的码位（0xFF 等可伸缩括号片）是**有意丢弃**，不算未知。
+
+    实测结论：三个目标 **只有 1 处必修**（`n·n=`），修到副本后逐字守恒
+    （`·` 37→36、`⋅` 40→41，710 公式 / 4 媒体 / 23 包内条目全不变，
+    正文 36 个 `·` 一个没动）。另外 OLE 抽查 112 个公式成功解析 106 个，
+    `\cdot` 都是结构化 LaTeX，没有字符码点问题；`.doc` 老格式与扫描件
+    属于覆盖边界，只能转格式后再查。
+
 ---
 
 ## 渲染级视觉验证（docx → PDF → 图，2026-09-28 实测打通）
@@ -1092,6 +1137,7 @@ latex-omml/
 │   ├── render_docx_preview.py docx→PDF→PNG 视觉核对（Word COM，受限环境会明确报错）
 │   ├── scan_symbol_table.py   符号库体检：上游码点笔误 / 文档一致性 / 字形覆盖
 │   ├── fix_docx_symbols.py    修复成品 docx 里固化的错误符号（只读体检 / 修到副本）
+│   ├── audit_formula_chars.py 统一公式字符体检（docx + PDF，ERROR/WARN/INFO 三级）
 │   └── MML2OMML.XSL           微软官方转换表（内置，194KB）
 └── references/
     └── symbols.md             数学符号 LaTeX 速查表

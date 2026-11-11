@@ -563,3 +563,59 @@ python scripts/fix_docx_symbols.py 文档.docx --fix          # 修到 _符号�
 30°             ❌  U+00B0 落在基线，不是上标
 30^{\mathrm{o}} ❌  字母 o，不是数学度号
 ```
+
+---
+
+## 附：跨格式公式字符体检（2026-11）
+
+`fix_docx_symbols.py` 只看 `<m:t>`，覆盖不到 MathType OLE、图片公式和 PDF 文字层。
+`audit_formula_chars.py` 把 docx + PDF 一起盘，并**按处置级别分开报**：
+
+```bash
+python scripts/audit_formula_chars.py "C:\资料目录" "试卷.pdf" -r
+python scripts/audit_formula_chars.py "C:\资料目录" -r --fix   # 只修 ERROR，输出到副本
+```
+
+| 级别 | 命中内容 | 处置 |
+|---|---|---|
+| ERROR | 公式内 `·` U+00B7、`~` U+007E、U+FFFD、私有区码点 | 修，改到 `<m:t>` 内 |
+| WARN | 公式内全角标点、Unicode 伪上标 `²³ⁿ`、SYM 未覆盖私有码点 | 只报告 |
+| INFO | `*` 星号、`□` 填空框、正文题源 `·`、OLE/图片公式数、扫描件 | 明确不动 |
+
+### 三条容易改坏的规则
+
+1. **正文 `·` 不是点乘**。实测某讲义 265 个 `·` 全是 `2021·北京人大附中模拟`
+   这类题源标注；三个目标合计 1366 个正文 `·`，改成 `⋅` 会把题源全毁掉。
+   修复正则必须严格限定 `<m:t>...</m:t>`。
+2. **`*` 不修**。抽样看几乎都是 `n∈N*`、星级标记等原稿写法（用户 2026-11-11 确认），
+   换成二元运算符 `∗` 会多出间距。
+3. **`□` 不修**。组合数学原题里是合法的填空占位符，不是缺字方框。
+   真正的缺字是 U+FFFD 替换符或私有区乱码。
+
+### PDF：Symbol 编码与 Euclid 字体的边界
+
+`pdf2docx_math.SYM` 是 Adobe Symbol 0x00–0xFF 编码表（191 条）。
+PDF 文字层里的 U+F0XX 由 `remap_symbol()` **减 0xF000** 后查表：
+
+| 码位 | 值 | 说明 |
+|---|---|---|
+| `0x7E` | `∼` U+223C | Adobe Symbol 的 similar。此前误写 `'~'`，2026-11 修正 |
+| `0xA3` | `≤` | 常见 |
+| `0xD7` | `⋅` U+22C5 | 数学点乘 |
+| `0xB7` | `•` U+2022 | Symbol 的 bullet，**不是**中文中点 `·` |
+| `0xFF` | `''` | 可伸缩括号片，有意丢弃 |
+
+实测 239 份 PDF（含 396 页讲义）：197 份带私有区码点，110 种 / 32809 次，
+其中 **3 种（U+F084 / F085 / F08C，10 次）不在 SYM 表内**。它们来自
+**EuclidMathOne / EuclidMathTwo**（MathType 专用字体，U+F08C 字形盒仅 3.3pt 宽，
+是整除竖线），不属于 Adobe Symbol 编码，**不能照 Symbol 表硬猜**。
+现在 `UNMAPPED_PRIVATE` 会记录被静默丢弃的码位，`unmapped_private_report()`
+可查；体检报告会列出未覆盖明细，提示人工核对原页。
+
+### 覆盖边界
+
+- **11 份纯扫描件 PDF** 没有文字层，字符检查无从谈起，要走多模态识别路线。
+- **`.doc` 老格式**（2 份）需先转成 docx。
+- **MathType OLE 公式**：字符在 MTEF 二进制里，`m:t` 扫不到；抽查 112 个
+  公式成功解析 106 个，`\cdot` 都是结构化 LaTeX，没有码点问题。
+  要查走 `mtef.py --json`。

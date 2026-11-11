@@ -151,7 +151,9 @@ SYM = {
     0x6C: 'λ', 0x6D: 'μ', 0x6E: 'ν', 0x6F: 'ο',
     0x70: 'π', 0x71: 'θ', 0x72: 'ρ', 0x73: 'σ', 0x74: 'τ', 0x75: 'υ',
     0x76: 'ϖ', 0x77: 'ω', 0x78: 'ξ', 0x79: 'ψ', 0x7A: 'ζ',
-    0x7B: '{', 0x7C: '|', 0x7D: '}', 0x7E: '~',
+    # Adobe Symbol 0x7E 是 similar「∼」，不是 ASCII 波浪号。此前写成 '~' 会让
+    # PDF 里的相似号落成 ASCII 波浪（与 latex2mathml 的 \sim 笔误同类）。
+    0x7B: '{', 0x7C: '|', 0x7D: '}', 0x7E: '∼',
     0xA0: '€', 0xA1: 'ϒ', 0xA2: '′', 0xA3: '≤', 0xA4: '⁄', 0xA5: '∞',
     0xA6: 'ƒ', 0xA7: '♣', 0xA8: '♦', 0xA9: '♥', 0xAA: '♠',
     0xAB: '↔', 0xAC: '←', 0xAD: '↑', 0xAE: '→', 0xAF: '↓',
@@ -193,14 +195,34 @@ FENCE_TEX = {
 }
 
 
+# 转换过程中遇到、但 SYM 表覆盖不到的私有区码位。
+# 典型来源：MathType 的 EuclidMathOne / EuclidMathTwo 字体（WPS 导出的 PDF），
+# 例如 U+F08C 是整除竖线、U+F084/F085 是组合符号碎片 —— 它们不属于 Adobe
+# Symbol 编码，不能照 Symbol 表硬猜。默认丢弃，但必须能被体检脚本查出来。
+UNMAPPED_PRIVATE = set()
+
+
 def remap_symbol(text):
-    """SymbolMT 私有区码位 -> Unicode。非私有区原样返回。"""
+    """SymbolMT 私有区码位 -> Unicode。非私有区原样返回。
+
+    SYM 表里存在但值为 '' 的码位（0xFF 等可伸缩括号片）是**有意丢弃**，
+    不记入 UNMAPPED_PRIVATE；只有表里完全没有的码位才算「未知」。
+    """
     if len(text) != 1:
         return text
     o = ord(text)
     if 0xF000 <= o <= 0xF0FF:
-        return SYM.get(o - 0xF000, '')
+        val = SYM.get(o - 0xF000)
+        if val is None:
+            UNMAPPED_PRIVATE.add(o)
+            return ''
+        return val
     return text
+
+
+def unmapped_private_report():
+    """返回本次转换中静默丢弃的私有区码位（升序）。换文档前可 clear()。"""
+    return sorted(UNMAPPED_PRIVATE)
 
 
 # ============================================================ Unicode -> LaTeX
