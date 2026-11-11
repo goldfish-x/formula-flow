@@ -1,6 +1,6 @@
 ---
 name: latex-omml
-version: 1.1.4
+version: 1.1.5
 slug: latex-omml
 displayName: 公式美化大师
 summary: 把数学公式变成 Word 里真正可编辑的对象——LaTeX 直接生成、MathType/PDF 无损还原、伪公式批量升级，数字与括号正体、字母斜体，符合试卷排版观感。
@@ -158,11 +158,13 @@ python scripts/mtef2docx.py "C:\讲义目录" --apply --outdir "C:\输出"
 
 ```bash
 python scripts/doctor.py            # 环境体检（推荐先跑这个）
-python scripts/latex2omml.py        # 跑 14 项核心符号测试
+python scripts/latex2omml.py        # 跑 17 项核心符号测试
 python scripts/md2docx.py --selftest
 python scripts/mtef.py --selftest   # MTEF 解析器自检
 python scripts/upgrade_math.py --selftest   # 伪公式转换规则自测
 python scripts/check_omml_delims.py --selftest  # 定界符陷阱（带负例）
+python scripts/scan_symbol_table.py --selftest  # 符号库上游笔误 / 文档一致性
+python scripts/fix_docx_symbols.py --selftest   # 成品 docx 符号替换边界
 ```
 
 `doctor.py` 逐项检查 Python 版本、必需/可选依赖、内置转换表、平台能力和端到端自检，
@@ -990,6 +992,52 @@ MathType 把 $|\vec{b}|$ 存成 `VEC(BAR(b))`，按字面翻译会得到
     ⚠️ 反过来的坑：如果为了"让分数变小"把整个 sup 降到 13，单字符 m 会跟着掉到 8.5，
     变成"分数对上了、旁边 m 太小"。**必须分两档写**。
 
+15. **上游符号表码点笔误 —— 公式里悄悄混进 `~` `*` `·`（2026-11 全表实测）**
+
+    现象：`\sim` 显示成 ASCII `~`、`\ast` 显示成 `*`、`\cdot` 显示成文本中点 `·`。
+    **不报错、不产生空公式**，只是字形不对；Word 里 `*` 偏上、`~` 位置过高、
+    `·` 是 `periodcentered` 而非 `dotmath`，肉眼很容易当成"字体就这样"放过。
+
+    真因在 `latex2mathml.symbols_parser.SYMBOLS`（4054 条）里三处码点写错：
+
+    | 命令 | 上游错值 | 正确码点 | 字体里其实是 |
+    |---|---|---|---|
+    | `\sim` | `0007E` `~` | U+223C `∼` | `asciitilde` → `similar` |
+    | `\ast` | `0002A` `*` | U+2217 `∗` | `asterisk` → `asteriskmath` |
+    | `\cdot` | `000B7` `·` | U+22C5 `⋅` | `periodcentered` → `dotmath` |
+
+    修法写在 `latex2omml._patch_upstream_symbols()`：引擎导入时**就地改字典本身**，
+    因为 `convert_symbol()` 每次查的都是同一个字典对象。改这里能保留 `<mo>` 语义
+    （运算符间距）；若在 premap 里换成裸字符，会退化成 `<mi>`、丢掉间距。
+    上游哪天修好了，补丁会自动跳过。`\colon`→`:`、`\vert`→`|`、`\less`→`<`
+    是 LaTeX 的标准语义，**不是笔误，别改**。
+
+    **已有成品 docx 要单独修**：补丁只影响新生成的文档，之前转出来的文件里
+    错误字符已固化在 `<m:t>` 中。用 `fix_docx_symbols.py` 扫 + 修：
+
+    ```bash
+    python scripts/fix_docx_symbols.py "C:\讲义目录" -r        # 只读体检，不动文件
+    python scripts/fix_docx_symbols.py 文档.docx --fix          # 修到 _符号修正.docx 副本
+    python scripts/fix_docx_symbols.py 文档.docx --fix --stars  # 连星号一起修
+    ```
+
+    - `·`→`⋅`、`~`→`∼` 默认修（这两类确是上游笔误的产物）。
+    - `*` 默认**不修**：抽样看几乎都是 `n∈N*`、`k∈ℕ*` 这类原稿自带的上标星号，
+      不是 `\ast` 笔误；换成二元运算符 `∗` 反而带来多余间距。确需修才加 `--stars`。
+    - 替换是字符串级正则，严格限定在 `<m:t>...</m:t>` 内，不经 XML 解析器重排，
+      命名空间、属性顺序、公式结构、插图全部不动。实测 875 公式 / 2 插图 /
+      14443 字符逐字守恒（把新字符换回旧字符后完全相同）。
+
+    **别把"未映射"当成"会丢字"**：实测 Cambria Math 对 U+27F9 `⟹`、
+    U+223D `∽`、U+2460…U+2469 `①…⑩`、U+2218 `∘`、U+00B0 `°` **都有字形**。
+    转换报告说某符号"没有映射规则"，只说明脚本没有对应语义标签，不等于 Word
+    显示不出来 —— 原样放进 `m:t` 即可。上游表里确有 179 个码点无字形，但
+    **没有一条是常用命令**（`\Box`/`\lll`/`\nleq`/`\thicksim` 等全都有字形）。
+
+    两条可复跑的护栏：`scan_symbol_table.py --selftest`（53 条标准映射 +
+    54 对文档条目 + 3 条上游补丁生效），`fix_docx_symbols.py --selftest`
+    （替换只在 `m:t` 内发生、正文 run 不受影响、默认不动星号）。
+
 ---
 
 ## 渲染级视觉验证（docx → PDF → 图，2026-09-28 实测打通）
@@ -1042,6 +1090,8 @@ latex-omml/
 │   ├── fix_omml_delims.py     修复成品 docx 里缺失的 endChr（批量/原地/自动备份）
 │   ├── clamp_script_sz.py     钳制上标/下标/根指数字号（对齐参照物，只动 sup/sub/deg）
 │   ├── render_docx_preview.py docx→PDF→PNG 视觉核对（Word COM，受限环境会明确报错）
+│   ├── scan_symbol_table.py   符号库体检：上游码点笔误 / 文档一致性 / 字形覆盖
+│   ├── fix_docx_symbols.py    修复成品 docx 里固化的错误符号（只读体检 / 修到副本）
 │   └── MML2OMML.XSL           微软官方转换表（内置，194KB）
 └── references/
     └── symbols.md             数学符号 LaTeX 速查表

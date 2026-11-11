@@ -19,6 +19,37 @@ import sys
 from lxml import etree
 import latex2mathml.converter as _conv
 
+# ------------------------------------------------- 上游符号表勘误（2026-11）
+# latex2mathml 的 symbols_parser.SYMBOLS 里有若干码点写错，转换时**不报错**，
+# 只是把 ASCII 标点塞进 <mo>，Word 里显示成错误字形（静默错误）：
+#   \sim  0007E '~' -> 0223C '∼'   （同义的 \thicksim 用的才是正确码点）
+#   \ast  0002A '*' -> 02217 '∗'
+#   \cdot 000B7 '·' -> 022C5 '⋅'   （periodcentered 是文本中点；Word 数学用 dotmath）
+# convert_symbol() 每次调用都查同一个字典对象，就地改字典即可修根因，
+# 且保留 <mo> 语义；若在 premap 里换成裸字符，会退化成 <mi>、丢掉运算符间距。
+_UPSTREAM_SYMBOL_FIXES = {
+    r'\sim':  '0223C',
+    r'\ast':  '02217',
+    r'\cdot': '022C5',
+}
+
+
+def _patch_upstream_symbols():
+    """修正上游符号表笔误，返回实际打过补丁的命令；上游已修好则自动跳过。"""
+    try:
+        from latex2mathml import symbols_parser as _sp
+    except ImportError:                                      # pragma: no cover
+        return []
+    applied = []
+    for cmd, code in _UPSTREAM_SYMBOL_FIXES.items():
+        if _sp.SYMBOLS.get(cmd) != code:
+            _sp.SYMBOLS[cmd] = code
+            applied.append(cmd)
+    return applied
+
+
+PATCHED_SYMBOLS = _patch_upstream_symbols()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # XSL 查找顺序：skill 内置 > Office 安装目录（32/64 位）
@@ -725,6 +756,10 @@ def selftest():
         # 回归：分段函数右边不能凭空多一个 ")"
         (r'\begin{cases}1 & x>0\\ 0 & x\leq 0\end{cases}', '<m:endChr m:val=""/>',
          '分段函数右定界符'),
+        # 回归：上游符号表把这三个命令误映射成 ASCII 标点（静默错、不报错）
+        (r'A\sim B', '∼', '相似关系(上游勘误)'),
+        (r'a\ast b', '∗', '数学星号(上游勘误)'),
+        (r'a\cdot b', '⋅', '点乘(上游勘误)'),
     ]
     ok = fail = 0
     detail = []
@@ -737,6 +772,9 @@ def selftest():
             body = ''.join(t.text or '' for t in root.iter(M + 't'))
             if hit and name in ('紧邻绝对值',):
                 hit = ('a' in body) and ('i' in body) and ('j' in body)
+            # 上游勘误三条：新字符必须在，旧的 ASCII 错字必须彻底消失
+            if hit and '上游勘误' in name:
+                hit = not any(c in body for c in '~*·')
         except Exception as e:
             hit = False
             xml = str(e)

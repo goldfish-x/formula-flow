@@ -189,11 +189,19 @@ x-y=3
 |---|---|---|---|
 | ∠ | `\angle` | ⊥ | `\perp` |
 | ∥ | `\parallel` | △ | `\triangle` |
-| ⊙ | `\odot` | ⌒ | `\frown` |
-| ° | `^\circ` | ′ | `'` |
-| ⌢ | `\smile` | ⊚ | `\circledcirc` |
+| ⊙ | `\odot` | ⌢ | `\frown` |
+| ∘ | `^\circ` | ′ | `'` |
+| ⌣ | `\smile` | ⊚ | `\circledcirc` |
 
 **角度写法**：`30^\circ`，`90^\circ`，`\angle ABC = 60^\circ`
+
+⚠️ 两个易混点（2026-11 实测校正）：
+
+1. **度数不是 `°`**。`^\circ` 生成的是 `m:sSup`（底数 + 上标的 `∘` U+2218 RING
+   OPERATOR）；直接写 `°` U+00B0 只落在基线上，是个普通度号，不是上标。两者
+   Cambria Math 都有字形，但只有 `^\circ` 的结构是对的。
+2. **`\frown`/`\smile` 曾在本表里写反**：`\frown` = `⌢` U+2322，`\smile` = `⌣` U+2323。
+   `⌒` U+2312 是 ARC，跟这两个都不同；要画弧线用 `\overparen{AB}`（U+23DC `⏜`）。
 
 ---
 
@@ -475,4 +483,83 @@ z = zipfile.ZipFile('讲义.docx')
 for n in z.namelist():
     if n.startswith('word/media/') and n.lower().endswith('.wmf'):
         open(os.path.basename(n), 'wb').write(z.read(n))
+```
+
+---
+
+## 附：符号库体检与上游勘误（2026-11）
+
+`scripts/scan_symbol_table.py` 会一次性做三件事：扫上游 `SYMBOLS` 表里退化为
+ASCII 的条目、逐条核对本文件与引擎的实际输出、统计 Cambria Math 无字形的码点。
+
+### 已修正的上游笔误（引擎导入时自动打补丁）
+
+| 命令 | 上游错值 | 正确码点 | 说明 |
+|---|---|---|---|
+| `\sim` | `0007E` `~` | U+223C `∼` | `\thicksim` 用的才是正确码点；ASCII `~` 是 `asciitilde` 字形 |
+| `\ast` | `0002A` `*` | U+2217 `∗` | ASCII `*` 在数学字体里是偏上的 `asterisk`，不是 `asteriskmath` |
+| `\cdot` | `000B7` `·` | U+22C5 `⋅` | `periodcentered` 是文本中点；Word 公式用 `dotmath` |
+
+这三条在 Cambria Math 里是**三个不同的字形**，所以修正后肉眼可见，不只是码点变好看。
+补丁写在 `latex2omml._patch_upstream_symbols()`：改的是 `symbols_parser.SYMBOLS`
+字典本身（保留 `<mo>` 语义），上游哪天修好了会自动跳过。
+
+`\colon`→`:`、`\vert`→`|`、`\less`→`<` 这类**不是笔误**，是 LaTeX 的标准语义，别改。
+
+### 箭头 / 关系符 / 圈码：会不会在 Word 里丢字符？
+
+实测 `C:\Windows\Fonts\cambria.ttc` 的第 1 号字体（Cambria Math）：
+
+| 字符 | 码点 | LaTeX | Cambria Math |
+|---|---|---|---|
+| ⟹ | U+27F9 | `\Longrightarrow` | 有字形 |
+| ⇒ | U+21D2 | `\Rightarrow` | 有字形 |
+| ∽ | U+223D | `\backsim` | 有字形 |
+| ∼ | U+223C | `\sim`（已修正） | 有字形 |
+| ① ② … ⑩ | U+2460…U+2469 | 直接写字符 | 有字形 |
+| ∘ / ° | U+2218 / U+00B0 | `^\circ` / 直接写 | 都有字形 |
+
+结论：**这些符号都不会丢**，"未映射"只说明转换脚本没有对应的语义标签，
+不等于 Word 显示不出来。转换时把它们原样放进 `m:t` 即可；只有圈码 ① 这类
+**文本符号**建议放在正文 run 里，别塞进公式（字形宽度按全角算，基线会不齐）。
+
+### 常用命令的字形覆盖（2026-11 实测）
+
+上游 4054 条里有 179 个码点在 Cambria Math 中无字形，但逐条筛过
+`\Box` `\Diamond` `\lll` `\ggg` `\lessdot` `\nleq` `\ngeq` `\nsim` `\ncong`
+`\thicksim` `\thickapprox` `\overparen` `\dashrightarrow` `\boxplus` 等常用命令，
+**全部有字形**。缺的都是 `\enleadertwodots`、`\caretinsert`、`\Question`、
+`\enclosetriangle` 这类生僻排版符号 —— 用到才会丢字，属于信息项不是故障。
+`scan_symbol_table.py --all` 可以列出全部。
+
+### 旧文档里已经固化的错误字符
+
+引擎补丁只管新生成的文档。此前转换出来的成品 docx，`·` `~` 已经写进 `<m:t>`，
+用 `fix_docx_symbols.py` 单独修：
+
+```bash
+python scripts/fix_docx_symbols.py "C:\讲义目录" -r        # 只读体检
+python scripts/fix_docx_symbols.py 文档.docx --fix          # 修到 _符号修正.docx
+```
+
+默认修 `·`→U+22C5、`~`→U+223C；`*` 默认不动（多为 `n∈N*` 原稿写法），
+确需修加 `--stars`。2026-11 实测桌面 3198 份 docx：3168 份可解析、
+**40 份命中**；本项目两份成品各修 3 处与 11 处，公式数与插图数守恒。
+
+### 体检判据的两条边界
+
+- A 类（必坏）看的是**最终 OMML 输出**，不是上游表原始值。`\perp` 上游写
+  U+27C2，引擎的字符纠错表已补成 U+22A5，只算"已补偿"不算故障。
+- `\degree` / `\degreeCelsius` / `\celsius` 经 premap 改写成 `^{\circ}` 这类
+  **结构型表达式**，不适用"最终文本 == 单个字符"的判据，单列跳过。
+  直接写 `°` U+00B0 只落在基线上，结构反而是错的。
+
+### 度数上标的唯一正确写法
+
+```
+30^\circ        ✅  m:sSup（底数 30 + 上标 ∘ U+2218）
+30^{\circ}      ✅  同上
+30\degree       ✅  premap 改写为 ^{\circ}
+30°             ❌  U+00B0 落在基线，不是上标
+30^{\mathrm{o}} ❌  字母 o，不是数学度号
 ```
